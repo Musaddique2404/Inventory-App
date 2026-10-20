@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#d97706">
-  <title>StockControl - Inventory Management System</title>
+  <title>Ateer - Inventory Management System</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,7 +21,7 @@
 
         <div class="auth-logo">
           <div class="auth-logo-mark">Musaddique's</div>
-          <div class="auth-logo-title">StockControl</div>
+          <div class="auth-logo-title">Ateer</div>
           <div class="auth-logo-desc">Inventory Management System</div>
         </div>
 
@@ -87,7 +87,7 @@
     <header class="mobile-header">
       <div>
         <div class="logo-mark">Musaddique's</div>
-        <div class="logo-title">StockControl</div>
+        <div class="logo-title">Ateer</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <div id="mobile-page-indicator" class="mobile-page-badge"></div>
@@ -100,7 +100,7 @@
       <aside class="sidebar">
         <div class="sidebar-logo">
           <div class="logo-mark">Musaddique's</div>
-          <div class="logo-title">StockControl</div>
+          <div class="logo-title">Ateer</div>
           <div class="logo-desc">Inventory System</div>
         </div>
         <nav class="nav">
@@ -113,6 +113,9 @@
           </button>
           <button class="nav-btn" data-page="sales">
             <span class="nav-icon">↯</span><span class="nav-text">Sales</span>
+          </button>
+          <button class="nav-btn" data-page="purchases">
+            <span class="nav-icon">↧</span><span class="nav-text">Purchases</span>
           </button>
         </nav>
         <div class="sidebar-footer">
@@ -173,6 +176,8 @@
         </div>
 
         <div id="sales-page" class="page" style="display:none;"></div>
+
+        <div id="purchases-page" class="page" style="display:none;"></div>
       </main>
     </div>
 
@@ -187,6 +192,9 @@
         </button>
         <button class="bottom-nav-btn" data-page="sales">
           <span class="bnav-icon">↯</span><span class="bnav-label">Sales</span>
+        </button>
+        <button class="bottom-nav-btn" data-page="purchases">
+          <span class="bnav-icon">↧</span><span class="bnav-label">Purchases</span>
         </button>
       </div>
     </nav>

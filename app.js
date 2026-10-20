@@ -44,6 +44,7 @@ let state = {
   expandedSales: {},
   expandedPurchases: {},
   inventorySearch: '',
+  inventoryFilter: 'all',
   dateFilter: 'today',
   customDateStart: new Date().toISOString().slice(0, 10),
   customDateEnd:   new Date().toISOString().slice(0, 10),
@@ -94,17 +95,88 @@ function fmtDate(date) {
   return date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+// Number without currency, e.g. 1,250.00
+function fmtNum(num) {
+  return Number(num || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Size class for long amounts so big numbers still fit on a phone
+function sizeClass(text, longAt, xlongAt) {
+  const n = String(text).length;
+  return n >= xlongAt ? ' xlong' : n >= longAt ? ' long' : '';
+}
+
+// ─── Icons (24×24 stroke icons) ──────────────────────────────────────────────
+const ICONS = {
+  dashboard: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
+  box:       'M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8',
+  trend:     'M3 17l6-6 4 4 8-8M15 7h6v6',
+  cart:      'M6 6h15l-2 9H8zM6 6L5 3H2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM18 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  moon:      'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
+  sun:       'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  power:     'M12 3v9M6.4 6.4a8 8 0 1 0 11.2 0',
+  doc:       'M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5',
+  dollar:    'M12 3v18M17 7H9.5a3 3 0 0 0 0 6h5a3 3 0 0 1 0 6H6',
+  alert:     'M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+  bars:      'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  check:     'M5 12l5 5 9-10',
+  bolt:      'M13 2L4 14h7l-1 8 9-12h-7z',
+  search:    'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4.2-4.2',
+  plus:      'M12 5v14M5 12h14',
+  x:         'M6 6l12 12M18 6L6 18',
+  chevron:   'M6 9l6 6 6-6',
+  trash:     'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  cash:      'M3 7h18v10H3zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  card:      'M3 6h18v12H3zM3 10h18M7 15h4',
+  bank:      'M3 10h18M5 10v7M9.5 10v7M14.5 10v7M19 10v7M3 20h18M12 3l9 5H3z',
+  factory:   'M3 21V10l6 3V10l6 3V6l6-3v18zM3 21h18',
+  inbox:     'M12 3v11M7 9l5 5 5-5M4 15v5h16v-5',
+  refresh:   'M20 11a8 8 0 0 0-14.9-4M4 4v4h4M4 13a8 8 0 0 0 14.9 4M20 20v-4h-4',
+};
+
+function ic(name, size = 16, stroke = 2) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[name] || ''}"></path></svg>`;
+}
+
+const PAY_IC   = { cash: 'cash', card: 'card', credit: 'bank' };
+const PAY_TONE = { cash: 'green', card: 'blue', credit: 'purple' };
+const PAY_NAME = { cash: 'Cash', card: 'Card', credit: 'Credit' };
+function payOf(r) { return PAY_IC[r.paymentType] ? r.paymentType : 'cash'; }
+
+// ─── Theme (light / dark) ────────────────────────────────────────────────────
+function isDark() { return document.documentElement.getAttribute('data-theme') === 'dark'; }
+
+function toggleTheme() {
+  const dark = !isDark();
+  if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+  else      document.documentElement.removeAttribute('data-theme');
+  try { localStorage.setItem('ateer-theme', dark ? 'dark' : 'light'); } catch (e) {}
+  updateThemeChrome();
+}
+
+function updateThemeChrome() {
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.innerHTML = ic(isDark() ? 'sun' : 'moon', 17);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', isDark() ? '#141517' : '#f4f2ef');
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // AUTH LAYER
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Switch between Sign In / Create Account tabs
 function switchAuthTab(tab) {
-  document.getElementById('auth-login-form').style.display    = tab === 'login'    ? '' : 'none';
-  document.getElementById('auth-register-form').style.display = tab === 'register' ? '' : 'none';
-  document.getElementById('tab-login').classList.toggle('active',    tab === 'login');
-  document.getElementById('tab-register').classList.toggle('active', tab === 'register');
-  // Clear errors on tab switch
+  const login = tab === 'login';
+  document.getElementById('auth-login-form').style.display    = login ? '' : 'none';
+  document.getElementById('auth-register-form').style.display = login ? 'none' : '';
+  document.getElementById('tab-login').classList.toggle('active',    login);
+  document.getElementById('tab-register').classList.toggle('active', !login);
+  const title = document.getElementById('auth-title');
+  const sub   = document.getElementById('auth-sub');
+  if (title) title.textContent = login ? 'Welcome back' : 'Create your account';
+  if (sub)   sub.textContent   = login ? 'Sign in to manage your stock, sales and purchases.'
+                                       : 'Your shop data stays private to your account.';
   ['err-login-email','err-login-password','err-login-general',
    'err-reg-name','err-reg-email','err-reg-password','err-reg-general'].forEach(id => {
     const el = document.getElementById(id);
@@ -218,18 +290,14 @@ function showAppScreen(user) {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app-screen').style.display  = '';
 
-  // Sidebar user info
-  const name  = user.displayName || user.email;
-  const email = user.email;
-  const initials = name.charAt(0).toUpperCase();
+  // Header + tab bar icons
+  updateThemeChrome();
+  const out = document.getElementById('logout-btn');
+  if (out) out.innerHTML = ic('power', 17);
+  document.querySelectorAll('.tab-ic[data-icon]').forEach(el => { el.innerHTML = ic(el.dataset.icon, 19); });
 
-  document.getElementById('sidebar-avatar').textContent     = initials;
-  document.getElementById('sidebar-user-name').textContent  = name;
-  document.getElementById('sidebar-user-email').textContent = email;
-
-  // Setup nav buttons (once)
-  document.querySelectorAll('.nav-btn, .bottom-nav-btn').forEach(btn => {
-    // Clone to remove old listeners
+  // Tab buttons (re-bind once per sign-in)
+  document.querySelectorAll('.tab-btn').forEach(btn => {
     const fresh = btn.cloneNode(true);
     btn.parentNode.replaceChild(fresh, btn);
     fresh.addEventListener('click', () => navigateTo(fresh.dataset.page));
@@ -443,12 +511,13 @@ async function recordPurchase(data, { updateCostPrice = true } = {}) {
 function showToast(message, type = 'success') {
   const area  = document.getElementById('toast-area');
   const toast = document.createElement('div');
+  const ok    = type === 'success';
   toast.className = `toast toast-${type}`;
-  toast.textContent = `${type === 'success' ? '✓' : '✕'} ${message}`;
+  toast.innerHTML = `<span class="ic ${ok ? 'ic-green' : 'ic-red'}">${ic(ok ? 'check' : 'x', 14, 2.4)}</span><span>${esc(message)}</span>`;
   area.appendChild(toast);
   setTimeout(() => {
-    toast.style.opacity = '0';
     toast.style.transition = 'opacity 0.2s';
+    toast.style.opacity = '0';
     setTimeout(() => toast.remove(), 200);
   }, 3000);
 }
@@ -465,8 +534,7 @@ function closeModal() {
 }
 
 function updateSidebarProductCount() {
-  const el = document.getElementById('sidebar-product-count');
-  if (el) el.textContent = `${state.products.length} Product${state.products.length !== 1 ? 's' : ''}`;
+  // Product count is shown on the dashboard; nothing else to update.
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -475,20 +543,11 @@ function updateSidebarProductCount() {
 
 function navigateTo(page) {
   state.currentPage = page;
-
-  document.querySelectorAll('.nav-btn').forEach(btn =>
+  document.querySelectorAll('.tab-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.page === page));
-  document.querySelectorAll('.bottom-nav-btn').forEach(btn =>
-    btn.classList.toggle('active', btn.dataset.page === page));
-
-  const indicator = document.getElementById('mobile-page-indicator');
-  if (indicator) {
-    indicator.textContent = { dashboard: 'Dashboard', inventory: 'Inventory', sales: 'Sales', purchases: 'Purchases' }[page] || '';
-  }
-
   document.querySelectorAll('.page').forEach(p => (p.style.display = 'none'));
-  document.getElementById(`${page}-page`).style.display = 'block';
-
+  document.getElementById(`${page}-page`).style.display = 'grid';
+  window.scrollTo(0, 0);
   renderCurrentPage();
 }
 
@@ -512,30 +571,30 @@ function renderCurrentPage() {
 function productFormHTML(product = null) {
   const isEdit = product !== null;
   return `
-    <div class="modal-title">${isEdit ? '✎ Edit Product' : '➕ Add New Product'}</div>
+    <div class="modal-title"><span class="ic ic-orange">${ic('box')}</span>${isEdit ? 'Edit product' : 'Add product'}</div>
     <form id="product-form" onsubmit="return handleProductSubmit(event, ${isEdit ? `'${product.id}'` : 'null'})">
       <div class="form-grid">
         <div class="field">
-          <label>Product Name <span class="req">*</span></label>
-          <input type="text" name="name" value="${product?.name || ''}" placeholder="e.g. Apple AirPods" required>
+          <label>Product name <span class="req">*</span></label>
+          <input type="text" name="name" value="${esc(product?.name || '')}" placeholder="e.g. Apple AirPods" required>
         </div>
         <div class="form-row">
           <div class="field">
             <label>Quantity <span class="req">*</span></label>
-            <input type="number" name="quantity" value="${product?.quantity ?? ''}" min="0" placeholder="0" required>
+            <input type="number" name="quantity" value="${product?.quantity ?? ''}" min="0" placeholder="0" inputmode="numeric" required>
           </div>
           <div class="field">
-            <label>Buying Price (optional)</label>
-            <input type="number" name="costPrice" value="${product?.costPrice ?? ''}" min="0" step="0.01" placeholder="0.00">
+            <label>Buying price</label>
+            <input type="number" name="costPrice" value="${product?.costPrice ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
           </div>
         </div>
         <div class="field">
-          <label>Selling Price (optional)</label>
-          <input type="number" name="price" value="${product?.price ?? ''}" min="0" step="0.01" placeholder="0.00">
+          <label>Selling price</label>
+          <input type="number" name="price" value="${product?.price ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
         </div>
         <div class="form-actions">
           <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-          <button type="submit" class="btn btn-amber">${isEdit ? '✓ Save Changes' : '+ Add Product'}</button>
+          <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Add product'}</button>
         </div>
       </div>
     </form>`;
@@ -556,16 +615,14 @@ function handleProductSubmit(event, productId) {
 
 function saleFormHTML() {
   return `
-    <div class="modal-title">⚡ Record New Sale</div>
-    <div id="sale-form-content" style="max-height:75vh;overflow-y:auto;padding-right:4px;">
-      <div style="margin-bottom:20px;">
-        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;display:flex;align-items:center;gap:8px;">
-          <span>👤</span> Customer Information
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+    <div class="modal-title"><span class="ic ic-orange">${ic('bolt')}</span>New sale</div>
+    <div id="sale-form-content">
+      <div class="form-section">
+        <div class="form-label"><span class="lbl">Customer</span></div>
+        <div class="form-row">
           <div class="field">
-            <label>Full Name <span class="req">*</span></label>
-            <input type="text" id="customer-name" placeholder="Ahmed Al-Rashid">
+            <label>Full name <span class="req">*</span></label>
+            <input type="text" id="customer-name" placeholder="Ahmed Al-Rashid" autocomplete="off">
             <span class="err-msg" id="err-customer-name"></span>
           </div>
           <div class="field">
@@ -575,44 +632,36 @@ function saleFormHTML() {
           </div>
         </div>
       </div>
-      <div style="border-top:1px solid var(--border);margin:20px 0;"></div>
-      <div style="margin-bottom:20px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-          <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);display:flex;align-items:center;gap:8px;">
-            <span>📦</span> Products (<span id="item-count">1</span>)
-          </div>
-          <button type="button" onclick="addSaleItem()" style="display:flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;border:1px dashed var(--amber-dim);background:var(--amber-glow);color:var(--amber);font-family:var(--mono);font-size:11px;font-weight:600;cursor:pointer;letter-spacing:1px;">
-            + ADD ITEM
-          </button>
+
+      <div class="form-divider"></div>
+
+      <div class="form-section">
+        <div class="form-label">
+          <span class="lbl">Products (<span id="item-count">1</span>)</span>
+          <button type="button" class="add-item-btn" onclick="addSaleItem()">+ Add item</button>
         </div>
-        <div style="display:grid;grid-template-columns:2fr 80px 100px 32px;gap:8px;margin-bottom:6px;padding:0 4px;">
-          <span style="font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text3);">Product</span>
-          <span style="font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text3);">Qty</span>
-          <span style="font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text3);">Price/Unit</span>
-          <span></span>
-        </div>
+        <div class="purchase-row purchase-row-head"><span>Product</span><span>Qty</span><span>Price / unit</span><span></span></div>
         <div id="sale-items-container"></div>
       </div>
-      <div style="border-top:1px solid var(--border);margin:20px 0;"></div>
-      <div style="margin-bottom:20px;">
-        <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;display:flex;align-items:center;gap:8px;">
-          <span>💰</span> Payment &amp; Tax
-        </div>
-        <div style="margin-bottom:16px;">
-          <label style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;">
-            <input type="checkbox" id="vat-included" checked style="width:18px;height:18px;cursor:pointer;accent-color:var(--amber);">
-            <div style="flex:1;">
-              <div style="font-weight:600;font-size:13px;color:var(--text);margin-bottom:2px;">VAT Included in Price</div>
-              <div id="vat-description" style="font-family:var(--mono);font-size:11px;color:var(--text3);">Prices already include 15% VAT</div>
-            </div>
-          </label>
-        </div>
-        <div id="payment-types" style="display:flex;gap:10px;"></div>
+
+      <div class="form-divider"></div>
+
+      <div class="form-section">
+        <div class="form-label"><span class="lbl">Payment &amp; tax</span></div>
+        <label class="option-check">
+          <input type="checkbox" id="vat-included" checked>
+          <div style="flex:1;">
+            <div class="option-check-title">VAT included in price</div>
+            <div class="option-check-desc" id="vat-description">Prices already include 15% VAT</div>
+          </div>
+        </label>
+        <div id="payment-types" class="pay-types"></div>
       </div>
+
       <div id="order-summary"></div>
-      <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-amber" onclick="submitSale()" style="padding:10px 24px;font-size:14px;">⚡ Record Sale</button>
+        <button type="button" class="btn btn-primary" onclick="submitSale()">Record sale</button>
       </div>
     </div>`;
 }
@@ -672,6 +721,7 @@ function renderSaleItems() {
   if (!container) return;
 
   const usedIds = saleFormState.items.map(it => it.productId).filter(Boolean);
+  const single  = saleFormState.items.length === 1;
 
   container.innerHTML = saleFormState.items.map(item => {
     const product   = state.products.find(p => p.id === item.productId);
@@ -680,40 +730,30 @@ function renderSaleItems() {
 
     const productOptions = state.products.map(p => {
       const disabled = p.quantity === 0 || (usedIds.includes(p.id) && p.id !== item.productId);
-      return `<option value="${p.id}" ${item.productId === p.id ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${p.name}${p.quantity === 0 ? ' (out)' : ''}</option>`;
+      return `<option value="${p.id}" ${item.productId === p.id ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${esc(p.name)} (${p.quantity === 0 ? 'out of stock' : p.quantity + ' in stock'})</option>`;
     }).join('');
 
     return `
-      <div style="margin-bottom:8px;">
-        <div style="display:grid;grid-template-columns:2fr 80px 100px 32px;gap:8px;align-items:start;">
-          <select onchange="updateSaleItem('${item.id}','productId',this.value)" style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--sans);font-size:13px;cursor:pointer;">
-            <option value="">— Select —</option>${productOptions}
-          </select>
-          <input type="number" min="1" max="${product?.quantity ?? ''}" value="${item.qty}"
-            onchange="updateSaleItem('${item.id}','qty',this.value)" placeholder="0"
-            ${!item.productId ? 'disabled' : ''}
-            style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px;color:var(--text);font-family:var(--sans);font-size:13px;">
-          <div style="position:relative;">
-            <span style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-family:var(--mono);font-size:10px;color:var(--text3);pointer-events:none;">SAR</span>
-            <input type="number" min="0" step="0.01" value="${item.price}"
-              onchange="updateSaleItem('${item.id}','price',this.value)" placeholder="0.00"
-              ${!item.productId ? 'disabled' : ''}
-              style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px 9px 38px;color:var(--text);font-family:var(--sans);font-size:13px;width:100%;">
+      <div class="purchase-item">
+        <div class="purchase-row">
+          <div class="purchase-product">
+            <select onchange="updateSaleItem('${item.id}','productId',this.value)">
+              <option value="">— Select product —</option>${productOptions}
+            </select>
           </div>
-          <button type="button" onclick="removeSaleItem('${item.id}')" ${saleFormState.items.length === 1 ? 'disabled' : ''}
-            style="width:32px;height:38px;border-radius:7px;border:1px solid var(--border);
-            background:${saleFormState.items.length === 1 ? 'transparent' : 'var(--red-dim)'};
-            color:${saleFormState.items.length === 1 ? 'var(--text3)' : 'var(--red)'};
-            cursor:${saleFormState.items.length === 1 ? 'not-allowed' : 'pointer'};
-            font-size:14px;display:flex;align-items:center;justify-content:center;">✕</button>
+          <input type="number" min="1" max="${product?.quantity ?? ''}" value="${esc(item.qty)}" placeholder="Qty" inputmode="numeric"
+            onchange="updateSaleItem('${item.id}','qty',this.value)" ${!item.productId ? 'disabled' : ''}>
+          <div class="sar-input">
+            <span>SAR</span>
+            <input type="number" min="0" step="0.01" value="${esc(item.price)}" placeholder="0.00" inputmode="decimal"
+              onchange="updateSaleItem('${item.id}','price',this.value)" ${!item.productId ? 'disabled' : ''}>
+          </div>
+          <button type="button" class="row-remove-btn" onclick="removeSaleItem('${item.id}')" ${single ? 'disabled' : ''} aria-label="Remove item">${ic('x', 15)}</button>
         </div>
-        ${lineTotal !== null ? `
-          <div style="display:flex;justify-content:flex-end;margin-top:4px;padding-right:40px;">
-            <span style="font-family:var(--mono);font-size:11px;color:var(--text3);">
-              ${item.qty} × ${fmt(Number(item.price))} = <strong style="color:var(--amber);">${fmt(lineTotal)}</strong>
-            </span>
-          </div>` : ''}
-        ${product ? `<div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:2px;padding-left:2px;">${product.quantity} in stock</div>` : ''}
+        <div class="purchase-item-meta">
+          <span>${product ? `${product.quantity} in stock` : 'Choose a product'}</span>
+          ${lineTotal !== null ? `<span>${item.qty} × ${fmt(Number(item.price))} = <strong style="color:var(--orange);">${fmt(lineTotal)}</strong></span>` : ''}
+        </div>
       </div>`;
   }).join('');
 
@@ -725,14 +765,8 @@ function renderPaymentTypes() {
   const container = document.getElementById('payment-types');
   if (!container) return;
   container.innerHTML = PAYMENT_TYPES.map(pt => `
-    <button type="button" onclick="saleFormState.paymentType='${pt.id}'; renderPaymentTypes();" style="
-      flex:1;padding:11px 8px;border-radius:10px;cursor:pointer;
-      font-family:var(--sans);font-size:13px;font-weight:600;
-      transition:all 0.15s;display:flex;flex-direction:column;align-items:center;gap:5px;border:2px solid;
-      border-color:${saleFormState.paymentType===pt.id ? 'var(--amber)' : 'var(--border)'};
-      background:${saleFormState.paymentType===pt.id ? 'var(--amber-glow)' : 'var(--bg3)'};
-      color:${saleFormState.paymentType===pt.id ? 'var(--amber)' : 'var(--text2)'};
-    "><span style="font-size:20px;">${pt.icon}</span>${pt.label}</button>`).join('');
+    <button type="button" class="pay-type-btn${saleFormState.paymentType === pt.id ? ' active' : ''}"
+      onclick="saleFormState.paymentType='${pt.id}'; renderPaymentTypes();">${ic(PAY_IC[pt.id], 20)}${pt.label}</button>`).join('');
 }
 
 function updateSaleFormSummary() {
@@ -742,23 +776,14 @@ function updateSaleFormSummary() {
   const subtotal   = saleFormState.items.reduce((s, i) => s + (isNaN(Number(i.qty)*Number(i.price)) ? 0 : Number(i.qty)*Number(i.price)), 0);
   const vatAmount  = saleFormState.vatIncluded ? 0 : subtotal * 0.15;
   const grandTotal = subtotal + vatAmount;
+  const n = saleFormState.items.length;
 
   container.innerHTML = `
-    <div style="background:linear-gradient(135deg,rgba(217,119,6,0.10),rgba(217,119,6,0.04));border:1px solid var(--amber-dim);border-radius:10px;padding:16px 20px;margin-bottom:20px;">
-      <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;">Order Summary</div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span style="font-size:13px;color:var(--text2);">Subtotal (${saleFormState.items.length} item${saleFormState.items.length!==1?'s':''})</span>
-        <span style="font-family:var(--mono);font-size:14px;font-weight:600;color:var(--text);">${fmt(subtotal)}</span>
-      </div>
-      ${!saleFormState.vatIncluded ? `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span style="font-size:13px;color:var(--text2);">VAT (15%)</span>
-        <span style="font-family:var(--mono);font-size:14px;font-weight:600;color:var(--text);">${fmt(vatAmount)}</span>
-      </div>` : ''}
-      <div style="border-top:1px solid var(--amber-dim);padding-top:12px;margin-top:8px;display:flex;justify-content:space-between;align-items:center;">
-        <span style="font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);">Grand Total</span>
-        <span style="font-family:var(--mono);font-size:26px;font-weight:700;color:var(--amber);">${fmt(grandTotal)}</span>
-      </div>
+    <div class="order-summary-box">
+      <div class="osb-label">Order summary</div>
+      <div class="summary-line"><span>Subtotal (${n} item${n !== 1 ? 's' : ''})</span><strong>${fmt(subtotal)}</strong></div>
+      ${!saleFormState.vatIncluded ? `<div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
+      <div class="summary-total"><span>Grand total</span><span class="summary-total-value">${fmt(grandTotal)}</span></div>
     </div>`;
 }
 
@@ -798,9 +823,6 @@ function submitSale() {
 
 const NEW_PRODUCT = '__new__';
 const VAT_RATE    = 0.15;
-const PAY_COLOR = { cash: '#16a34a', card: '#3b82f6', credit: '#a855f7' };
-const PAY_BG    = { cash: 'rgba(22,163,74,0.08)', card: 'rgba(59,130,246,0.08)', credit: 'rgba(168,85,247,0.08)' };
-const PAY_ICON  = { cash: '💵', card: '💳', credit: '🏦' };
 
 let purchaseFormState = { items: [], paymentType: 'cash', vatIncluded: true, updateCostPrice: true, errors: {}, submitting: false };
 
@@ -812,26 +834,26 @@ function openPurchaseForm(productId = '') {
 function purchaseFormHTML() {
   const suppliers = [...new Set(state.purchases.map(p => p.supplierName).filter(Boolean))];
   return `
-    <div class="modal-title">🛒 Record New Purchase</div>
-    <div class="purchase-form" style="max-height:75vh;overflow-y:auto;padding-right:4px;">
-      <div class="purchase-note">📥 Every item in this purchase is <strong>added to stock</strong> as soon as you save it.</div>
+    <div class="modal-title"><span class="ic ic-purple">${ic('cart')}</span>New purchase</div>
+    <div class="purchase-form">
+      <div class="purchase-note">Every item in this purchase is <strong>added to stock</strong> as soon as you save it.</div>
 
       <div class="form-section">
-        <div class="section-label"><span>🏭</span> Supplier Information</div>
+        <div class="form-label"><span class="lbl">Supplier</span></div>
         <div class="supplier-grid">
           <div class="field supplier-name-field">
-            <label>Supplier Name <span class="req">*</span></label>
+            <label>Supplier name <span class="req">*</span></label>
             <input type="text" id="supplier-name" list="supplier-list" placeholder="e.g. Al-Jazeera Trading" autocomplete="off">
             <datalist id="supplier-list">${suppliers.map(s => `<option value="${esc(s)}">`).join('')}</datalist>
             <span class="err-msg" id="err-supplier-name"></span>
           </div>
           <div class="field">
-            <label>Phone (optional)</label>
-            <input type="text" id="supplier-phone" placeholder="+966 5XX XXX XXXX">
+            <label>Phone <span class="hint">(optional)</span></label>
+            <input type="tel" id="supplier-phone" placeholder="+966 5XX XXX XXXX">
             <span class="err-msg" id="err-supplier-phone"></span>
           </div>
           <div class="field">
-            <label>Invoice / Ref No. (optional)</label>
+            <label>Invoice no. <span class="hint">(optional)</span></label>
             <input type="text" id="supplier-invoice" placeholder="INV-1001">
           </div>
         </div>
@@ -840,41 +862,39 @@ function purchaseFormHTML() {
       <div class="form-divider"></div>
 
       <div class="form-section">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-          <div class="section-label" style="margin:0;"><span>📦</span> Items (<span id="purchase-item-count">1</span>)</div>
-          <button type="button" class="add-item-btn" onclick="addPurchaseItem()">+ ADD ITEM</button>
+        <div class="form-label">
+          <span class="lbl">Items (<span id="purchase-item-count">1</span>)</span>
+          <button type="button" class="add-item-btn" onclick="addPurchaseItem()">+ Add item</button>
         </div>
-        <div class="purchase-row purchase-row-head">
-          <span>Product</span><span>Qty</span><span>Cost/Unit</span><span></span>
-        </div>
+        <div class="purchase-row purchase-row-head"><span>Product</span><span>Qty</span><span>Cost / unit</span><span></span></div>
         <div id="purchase-items-container"></div>
       </div>
 
       <div class="form-divider"></div>
 
       <div class="form-section">
-        <div class="section-label"><span>💰</span> Payment &amp; Options</div>
+        <div class="form-label"><span class="lbl">Payment &amp; options</span></div>
         <label class="option-check">
           <input type="checkbox" id="purchase-vat-included" checked>
           <div style="flex:1;">
-            <div class="option-check-title">VAT Included in Cost</div>
+            <div class="option-check-title">VAT included in cost</div>
             <div class="option-check-desc" id="purchase-vat-description">Costs already include 15% VAT</div>
           </div>
         </label>
         <label class="option-check">
           <input type="checkbox" id="purchase-update-cost" checked>
           <div style="flex:1;">
-            <div class="option-check-title">Update Buying Price in Inventory</div>
-            <div class="option-check-desc">Set each product's buying price to this purchase's unit cost</div>
+            <div class="option-check-title">Update buying price</div>
+            <div class="option-check-desc">Set each product's buying price to this unit cost</div>
           </div>
         </label>
-        <div id="purchase-payment-types" style="display:flex;gap:10px;margin-top:4px;"></div>
+        <div id="purchase-payment-types" class="pay-types"></div>
       </div>
 
       <div id="purchase-summary"></div>
-      <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-amber" id="btn-submit-purchase" onclick="submitPurchase()" style="padding:10px 24px;font-size:14px;">🛒 Record Purchase</button>
+        <button type="button" class="btn btn-primary" id="btn-submit-purchase" onclick="submitPurchase()">Record purchase</button>
       </div>
     </div>`;
 }
@@ -1010,7 +1030,7 @@ function renderPurchaseItems() {
             <input type="number" min="0" step="0.01" value="${esc(item.cost)}" placeholder="0.00"
               onchange="updatePurchaseItem('${item.id}','cost',this.value)" ${active ? '' : 'disabled'}>
           </div>
-          <button type="button" class="row-remove-btn" onclick="removePurchaseItem('${item.id}')" ${single ? 'disabled' : ''}>✕</button>
+          <button type="button" class="row-remove-btn" onclick="removePurchaseItem('${item.id}')" ${single ? 'disabled' : ''} aria-label="Remove item">${ic('x', 15)}</button>
         </div>
         ${item.isNew ? `
           <div class="new-product-extra">
@@ -1023,7 +1043,7 @@ function renderPurchaseItems() {
           </div>` : ''}
         <div class="purchase-item-meta">
           <span>${stockHint}</span>
-          ${lineTotal !== null ? `<span>${qty} × ${fmt(cost)} = <strong style="color:var(--amber);">${fmt(lineTotal)}</strong></span>` : ''}
+          ${lineTotal !== null ? `<span>${qty} × ${fmt(cost)} = <strong style="color:var(--orange);">${fmt(lineTotal)}</strong></span>` : ''}
         </div>
         ${err ? `<div class="err-msg" style="margin-top:4px;">${esc(err)}</div>` : ''}
       </div>`;
@@ -1036,14 +1056,9 @@ function renderPurchaseItems() {
 function renderPurchasePaymentTypes() {
   const container = document.getElementById('purchase-payment-types');
   if (!container) return;
-  container.innerHTML = PAYMENT_TYPES.map(pt => {
-    const on = purchaseFormState.paymentType === pt.id;
-    return `
-      <button type="button" class="pay-type-btn${on ? ' active' : ''}"
-        onclick="purchaseFormState.paymentType='${pt.id}'; renderPurchasePaymentTypes();">
-        <span style="font-size:20px;">${pt.icon}</span>${pt.label}
-      </button>`;
-  }).join('');
+  container.innerHTML = PAYMENT_TYPES.map(pt => `
+    <button type="button" class="pay-type-btn${purchaseFormState.paymentType === pt.id ? ' active' : ''}"
+      onclick="purchaseFormState.paymentType='${pt.id}'; renderPurchasePaymentTypes();">${ic(PAY_IC[pt.id], 20)}${pt.label}</button>`).join('');
 }
 
 function purchaseFormTotals() {
@@ -1064,14 +1079,11 @@ function updatePurchaseSummary() {
 
   container.innerHTML = `
     <div class="order-summary-box">
-      <div class="section-label" style="margin-bottom:12px;">Purchase Summary</div>
-      <div class="summary-line"><span>Units added to stock</span><strong style="color:var(--green);">+${units}</strong></div>
+      <div class="osb-label">Purchase summary</div>
+      <div class="summary-line"><span>Units added to stock</span><strong>+${units}</strong></div>
       <div class="summary-line"><span>Subtotal (${n} item${n !== 1 ? 's' : ''})</span><strong>${fmt(subtotal)}</strong></div>
       ${!purchaseFormState.vatIncluded ? `<div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
-      <div class="summary-total">
-        <span>Total Cost</span>
-        <span class="summary-total-value">${fmt(total)}</span>
-      </div>
+      <div class="summary-total"><span>Total cost</span><span class="summary-total-value">${fmt(total)}</span></div>
     </div>`;
 }
 
@@ -1080,7 +1092,7 @@ function setPurchaseSubmitting(on) {
   const btn = document.getElementById('btn-submit-purchase');
   if (btn) {
     btn.disabled = on;
-    btn.textContent = on ? 'Saving…' : '🛒 Record Purchase';
+    btn.textContent = on ? 'Saving…' : 'Record purchase';
   }
 }
 
@@ -1230,210 +1242,207 @@ function updateCustomDate() {
 // DASHBOARD RENDERING
 // ══════════════════════════════════════════════════════════════════════════════
 
+const RANGES = [
+  { id: 'today',  t: 'Today',  label: 'Today' },
+  { id: 'month',  t: 'Month',  label: 'This month' },
+  { id: 'year',   t: 'Year',   label: 'This year' },
+  { id: 'custom', t: 'Custom', label: 'Custom' },
+];
+
+function rangeLabel() {
+  return (RANGES.find(r => r.id === state.dateFilter) || RANGES[0]).label;
+}
+
+function plural(n, word) { return `${n} ${word}${n !== 1 ? 's' : ''}`; }
+
+function itemsSummary(items) {
+  const list = items ?? [];
+  if (!list.length) return 'No items';
+  const first = `${list[0].productName} ×${list[0].quantity}`;
+  return list.length > 1 ? `${first} +${list.length - 1} more` : first;
+}
+
 function renderDashboard() {
-  const container  = document.getElementById('dashboard-page');
+  const container = document.getElementById('dashboard-page');
+  if (!container) return;
+
   const lowStock   = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD);
-  const filteredSales = getFilteredSales();
-  const stats      = calculateSaleStats(filteredSales);
-  const filteredPurchases = getFilteredPurchases();
-  const purchaseSpend = filteredPurchases.reduce((s, x) => s + purchaseTotal(x), 0);
-  const purchaseUnitsIn = filteredPurchases.reduce((s, x) => s + purchaseUnits(x), 0);
+  const outCount   = state.products.filter(p => p.quantity === 0).length;
+  const stats      = calculateSaleStats(getFilteredSales());
   const allTimeRev = state.sales.reduce((s, x) => s + saleTotal(x), 0);
-  const recent     = state.sales.slice(0, 5); // already sorted newest first by listener
+  const recent     = state.sales.slice(0, 5);
+  const label      = rangeLabel();
+  const revText    = fmtNum(stats.totalRevenue);
+  const profitText = fmtNum(stats.totalProfit);
+  const dateLong   = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
   container.innerHTML = `
-    <div class="page-header">
-      <div class="page-title">Dashboard</div>
-      <div class="page-sub">SYSTEM_OVERVIEW // ${new Date().toLocaleDateString()}</div>
+    <div class="page-head">
+      <div class="page-head-text"><span class="page-title">Dashboard</span><span class="page-date">${dateLong}</span></div>
     </div>
 
-    <div class="card" style="margin-bottom:24px;padding:24px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
-        <div>
-          <div style="font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:4px;">📊 Sales Analytics</div>
-          <div style="font-size:15px;font-weight:600;color:var(--text);">${getDateFilterLabel()}</div>
-        </div>
-        <div class="date-filter-buttons" style="display:flex;background:var(--bg3);border-radius:8px;padding:4px;gap:2px;">
-          ${['today','month','year','custom'].map(f=>`
-            <button onclick="setDateFilter('${f}')" style="padding:6px 14px;border-radius:6px;border:none;cursor:pointer;font-family:var(--sans);font-size:13px;font-weight:500;transition:all 0.15s;background:${state.dateFilter===f?'var(--amber)':'transparent'};color:${state.dateFilter===f?'#000':'var(--text2)'};">${f.charAt(0).toUpperCase()+f.slice(1)}</button>`).join('')}
-        </div>
+    <div class="seg" role="tablist">
+      ${RANGES.map(r => `<button class="seg-btn${state.dateFilter === r.id ? ' active' : ''}" onclick="setDateFilter('${r.id}')">${r.t}</button>`).join('')}
+    </div>
+
+    ${state.dateFilter === 'custom' ? `
+    <div class="range-custom">
+      <div class="field"><label>From</label><input type="date" id="custom-start-date" value="${state.customDateStart}" onchange="updateCustomDate()"></div>
+      <div class="field"><label>To</label><input type="date" id="custom-end-date" value="${state.customDateEnd}" onchange="updateCustomDate()"></div>
+    </div>` : ''}
+
+    <div class="rev-card">
+      <span class="rev-deco"></span>
+      <div class="rev-top"><span class="rev-ic">${ic('trend')}</span><span class="rev-label">Total revenue</span><span class="rev-pill">${label}</span></div>
+      <div class="rev-amount"><span class="rev-cur">SAR</span><span class="rev-val${sizeClass(revText, 10, 13)}">${revText}</span></div>
+      <span class="rev-sub">${plural(stats.invoiceCount, 'transaction')}</span>
+    </div>
+
+    <div class="tiles2">
+      <div class="tile">
+        <span class="ic ic-blue">${ic('doc')}</span>
+        <div class="tile-body"><span class="tile-val">${stats.invoiceCount}</span><span class="tile-label">Invoices created</span><span class="tile-sub">${label}</span></div>
       </div>
-
-      ${state.dateFilter==='custom' ? `
-        <div class="custom-date-wrapper" style="margin-bottom:20px;padding:16px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
-            <div class="field" style="margin:0;"><label style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;">Start Date</label>
-              <input type="date" id="custom-start-date" value="${state.customDateStart}" onchange="updateCustomDate()" style="padding:8px 10px;font-size:13px;"></div>
-            <div class="field" style="margin:0;"><label style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;">End Date</label>
-              <input type="date" id="custom-end-date" value="${state.customDateEnd}" onchange="updateCustomDate()" style="padding:8px 10px;font-size:13px;"></div>
-          </div>
-          <button onclick="updateCustomDate()" class="btn btn-amber" style="width:100%;padding:10px 16px;font-size:13px;justify-content:center;">Apply Filter</button>
-        </div>` : ''}
-
-      <div class="sales-analytics-grid">
-        ${analyticsCard('💰 Total Revenue', fmt(stats.totalRevenue), `${stats.invoiceCount} transaction${stats.invoiceCount!==1?'s':''}`, 'var(--green)', 'rgba(22,163,74,0.08)', 'rgba(22,163,74,0.15)')}
-        ${analyticsCard('🧾 Invoices Created', stats.invoiceCount, state.dateFilter==='today'?'Today':state.dateFilter==='month'?'This month':state.dateFilter==='year'?'This year':'Selected period', '#3b82f6', 'rgba(59,130,246,0.08)', 'rgba(59,130,246,0.15)')}
-        ${analyticsCard('📈 Total Profit', fmt(stats.totalProfit), stats.totalRevenue>0?`${((stats.totalProfit/stats.totalRevenue)*100).toFixed(1)}% margin`:'No sales', 'var(--amber)', 'rgba(217,119,6,0.08)', 'rgba(217,119,6,0.15)')}
-        ${analyticsCard('🛒 Total Purchases', fmt(purchaseSpend), filteredPurchases.length ? `${filteredPurchases.length} purchase${filteredPurchases.length!==1?'s':''} · +${purchaseUnitsIn} units to stock` : 'No purchases', '#7c3aed', 'rgba(124,58,237,0.08)', 'rgba(124,58,237,0.15)')}
+      <div class="tile">
+        <span class="ic ic-green">${ic('dollar')}</span>
+        <div class="tile-body"><span class="tile-val${sizeClass(profitText, 8, 11)}"><span class="cur">SAR</span>${profitText}</span><span class="tile-label">Total profit</span><span class="tile-sub">${label}</span></div>
       </div>
     </div>
 
-    <div class="stats-grid">
-      <div class="stat-card amber">
-        <div class="stat-label">Total Products</div>
-        <div class="stat-value">${state.products.length}</div>
-        <div class="stat-desc">${state.products.filter(p=>p.quantity===0).length} out of stock</div>
-      </div>
-      <div class="stat-card red">
-        <div class="stat-label">Low Stock Alert</div>
-        <div class="stat-value">${lowStock.length}</div>
-        <div class="stat-desc">Items ≤ ${LOW_STOCK_THRESHOLD} units remaining</div>
-      </div>
-      <div class="stat-card green">
-        <div class="stat-label">All-Time Sales</div>
-        <div class="stat-value">${state.sales.length}</div>
-        <div class="stat-desc">${allTimeRev>0?`${fmt(allTimeRev)} total`:'No revenue tracked'}</div>
-      </div>
+    <div class="list-card">
+      <div class="lc-row"><span class="ic ic-orange">${ic('box')}</span><div class="lc-text"><span class="lc-title">Total products</span><span class="lc-sub">${outCount} out of stock</span></div><span class="lc-val">${state.products.length}</span></div>
+      <div class="lc-div"></div>
+      <div class="lc-row"><span class="ic ic-red">${ic('alert')}</span><div class="lc-text"><span class="lc-title">Low stock alert</span><span class="lc-sub">Items ≤ ${LOW_STOCK_THRESHOLD} units remaining</span></div><span class="lc-val">${lowStock.length}</span></div>
+      <div class="lc-div"></div>
+      <div class="lc-row"><span class="ic ic-green">${ic('bars')}</span><div class="lc-text"><span class="lc-title">All-time sales</span><span class="lc-sub">${allTimeRev > 0 ? `${fmt(allTimeRev)} total` : 'No revenue tracked'}</span></div><span class="lc-val">${state.sales.length}</span></div>
     </div>
 
-    <div class="dash-grid">
-      <div class="card">
-        <div class="card-title">⚠ Low Stock Items</div>
-        ${lowStock.length===0 ? `<div class="empty"><div class="empty-icon">✓</div><div class="empty-text">All products well stocked!</div></div>`
-          : `<div class="low-list">${lowStock.map(p=>`<div class="low-item"><span class="low-item-name">${p.name}</span><span class="low-item-qty">${p.quantity} left</span></div>`).join('')}</div>`}
-      </div>
+    <div class="box">
+      <div class="box-head"><span class="box-title">Low stock items</span><button class="box-link" onclick="navigateTo('inventory')">Inventory</button></div>
+      ${lowStock.length === 0
+        ? `<div class="soft-row"><span class="ic ic-green">${ic('check', 16, 2.4)}</span><span class="soft-row-text">All products well stocked!</span></div>`
+        : `<div class="box-list">${lowStock.map(p => `
+          <div class="soft-row" role="button" style="cursor:pointer" onclick="openPurchaseForm('${p.id}')" title="Restock ${esc(p.name)}">
+            <span class="ic ic-red">${ic('alert')}</span>
+            <div class="sr-text"><span class="sr-title">${esc(p.name)}</span><span class="sr-sub">Tap to restock</span></div>
+            <span class="sr-val red">${p.quantity} left</span>
+          </div>`).join('')}</div>`}
+    </div>
 
-      <div class="card" style="padding:0;overflow:hidden;">
-        <div style="padding:18px 24px;background:linear-gradient(135deg,rgba(217,119,6,0.05) 0%,transparent 100%);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <div style="width:32px;height:32px;border-radius:8px;background:var(--amber-glow);border:1px solid var(--amber-dim);display:flex;align-items:center;justify-content:center;font-size:16px;">↯</div>
-            <div>
-              <div style="font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);">Recent Activity</div>
-              <div style="font-size:13px;color:var(--text2);margin-top:2px;">Latest ${recent.length} transaction${recent.length!==1?'s':''}</div>
-            </div>
-          </div>
-          ${recent.length>0 ? `<div style="font-family:var(--mono);font-size:10px;color:var(--amber);background:var(--amber-glow);border:1px solid var(--amber-dim);border-radius:6px;padding:4px 10px;font-weight:600;letter-spacing:1px;">LIVE</div>` : ''}
-        </div>
-        ${recent.length===0
-          ? `<div class="empty" style="padding:64px 24px;"><div style="font-size:48px;margin-bottom:12px;opacity:0.4;">📊</div><div style="font-size:15px;font-weight:600;color:var(--text2);margin-bottom:6px;">No sales yet</div><div style="font-size:13px;color:var(--text3);">Your recent transactions will appear here</div></div>`
-          : `<div style="padding:8px 0;">${recent.map(s=>renderRecentSaleCard(s)).join('')}</div>`}
+    <div class="box">
+      <div class="box-head">
+        <div class="box-head-text"><span class="box-title">Recent activity</span><span class="box-sub">Latest ${plural(recent.length, 'transaction')}</span></div>
+        <button class="box-link" onclick="navigateTo('sales')">Sales</button>
       </div>
+      ${recent.length === 0
+        ? `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('bolt', 20)}</span><span class="empty-title">No sales yet</span><span class="empty-text">Your recent transactions will appear here</span></div>`
+        : `<div class="box-list">${recent.map(recentSaleRow).join('')}</div>`}
     </div>`;
 }
 
-function analyticsCard(label, value, sub, color, bg, border) {
+function recentSaleRow(s) {
+  const pt = payOf(s);
   return `
-    <div style="padding:20px;background:linear-gradient(135deg,${bg} 0%,rgba(0,0,0,0.01) 100%);border:1px solid ${border};border-radius:10px;position:relative;overflow:hidden;">
-      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:${color};"></div>
-      <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:10px;">${label}</div>
-      <div style="font-family:var(--mono);font-size:28px;font-weight:700;color:${color};line-height:1;margin-bottom:8px;">${value}</div>
-      <div style="font-size:12px;color:var(--text3);">${sub}</div>
+    <div class="soft-row" role="button" style="cursor:pointer" onclick="openSale('${s.id}')">
+      <span class="ic ic-${PAY_TONE[pt]}">${ic(PAY_IC[pt])}</span>
+      <div class="sr-text"><span class="sr-title">${esc(s.customerName || 'Walk-in customer')}</span><span class="sr-sub">${esc(itemsSummary(s.items))} · ${fmtDate(recordDate(s))}</span></div>
+      <div class="sr-end"><span class="sr-val green">${fmt(saleTotal(s))}</span><span class="tag ${pt}">${PAY_NAME[pt]}</span></div>
     </div>`;
 }
 
-function renderRecentSaleCard(s) {
-  const items    = s.items ?? [];
-  const tot      = saleTotal(s);
-  const pt       = s.paymentType ?? 'cash';
-  const payColor = {cash:'#16a34a',card:'#3b82f6',credit:'#a855f7'};
-  const payBg    = {cash:'rgba(22,163,74,0.10)',card:'rgba(59,130,246,0.10)',credit:'rgba(168,85,247,0.10)'};
-  const payIcon  = {cash:'💵',card:'💳',credit:'🏦'};
-
-
-  return `
-    <div style="margin:8px 16px;padding:16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;transition:all 0.2s ease;"
-         onmouseenter="this.style.background='var(--bg3)';this.style.borderColor='var(--amber-dim)';this.style.transform='translateX(4px)';"
-         onmouseleave="this.style.background='var(--bg2)';this.style.borderColor='var(--border)';this.style.transform='translateX(0)';">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:12px;">
-        <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;">
-          <div style="width:40px;height:40px;border-radius:10px;background:${payBg[pt]};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">${payIcon[pt]}</div>
-          <div><div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:2px;">${s.customerName||'Unknown'}</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);">📅 ${fmtDate(recordDate(s))}</div></div>
-        </div>
-        <div style="text-align:right;flex-shrink:0;">
-          <div style="font-family:var(--mono);font-size:18px;font-weight:800;color:var(--green);margin-bottom:2px;">${fmt(tot)}</div>
-          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);background:var(--bg3);border-radius:4px;padding:2px 6px;display:inline-block;">${(s.items ?? []).length} item${(s.items ?? []).length!==1?'s':''}</div>
-        </div>
-      </div>
-      <div style="height:1px;background:var(--border);margin:12px 0;"></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <div style="display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;">
-          ${items.slice(0,2).map(it=>`
-            <div style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 8px;color:var(--text2);font-weight:500;">
-              <span>📦</span><span>${it.productName}</span>
-              <span style="background:var(--amber-glow);color:var(--amber);border-radius:3px;padding:1px 4px;font-size:10px;font-weight:700;">×${it.quantity}</span>
-            </div>`).join('')}
-          ${items.length>2?`<span style="font-family:var(--mono);font-size:11px;color:var(--text3);padding:4px 6px;background:var(--bg3);border-radius:6px;font-weight:600;">+${items.length-2}</span>`:''}
-        </div>
-        <div style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:8px;font-size:11px;font-weight:700;font-family:var(--mono);background:${payBg[pt]};color:${payColor[pt]};border:1px solid ${payColor[pt]}30;white-space:nowrap;letter-spacing:0.5px;">${pt.toUpperCase()}</div>
-      </div>
-    </div>`;
+function openSale(id) {
+  state.expandedSales[id] = true;
+  navigateTo('sales');
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INVENTORY RENDERING (search-safe — only tbody re-renders on input)
+// INVENTORY RENDERING (search-safe — only the list re-renders while typing)
 // ══════════════════════════════════════════════════════════════════════════════
 
 function renderInventory() {
-  const sub = document.getElementById('inventory-sub');
-  if (sub) sub.textContent = `PRODUCT_DATABASE // ${state.products.length} items`;
+  const container = document.getElementById('inventory-page');
+  if (!container) return;
+  const low = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD).length;
+  const out = state.products.filter(p => p.quantity === 0).length;
+  const sub = `${plural(state.products.length, 'product')} · ${low} low · ${out} out of stock`;
 
-  const searchInput = document.getElementById('inventory-search');
-  if (searchInput && !searchInput._listenerAttached) {
-    searchInput.addEventListener('input', () => {
-      state.inventorySearch = searchInput.value;
-      renderInventoryTable();
-    });
-    searchInput._listenerAttached = true;
-    searchInput.value = state.inventorySearch;
+  if (!document.getElementById('inventory-list')) {
+    container.innerHTML = `
+      <div class="page-head"><div class="page-head-text"><span class="page-title">Inventory</span><span class="page-date" id="inventory-sub"></span></div></div>
+      <div class="head-actions two">
+        <button class="btn btn-primary" onclick="showModal(productFormHTML()); return false;">${ic('plus', 16, 2.4)}Add product</button>
+        <button class="btn btn-soft" onclick="openPurchaseForm(); return false;">${ic('cart')}Purchase stock</button>
+      </div>
+      <div class="search">${ic('search', 17)}<input type="search" id="inventory-search" placeholder="Search products…" autocomplete="off"></div>
+      <div class="seg" id="inventory-filter"></div>
+      <div class="box">
+        <div class="box-head"><div class="box-head-text"><span class="box-title">Products</span><span class="box-sub" id="inventory-count"></span></div></div>
+        <div id="inventory-list" class="box-list"></div>
+      </div>`;
+    const input = document.getElementById('inventory-search');
+    input.value = state.inventorySearch;
+    input.addEventListener('input', () => { state.inventorySearch = input.value; renderInventoryTable(); });
   }
-
+  document.getElementById('inventory-sub').textContent = sub;
   renderInventoryTable();
 }
 
-function renderInventoryTable() {
-  const sub = document.getElementById('inventory-sub');
-  if (sub) sub.textContent = `PRODUCT_DATABASE // ${state.products.length} items`;
+function setInventoryFilter(f) { state.inventoryFilter = f; renderInventoryTable(); }
 
-  const term     = state.inventorySearch.toLowerCase();
-  const filtered = state.products.filter(p => p.name.toLowerCase().includes(term));
-  const tbody    = document.getElementById('inventory-tbody');
-  if (!tbody) return;
+function renderInventoryTable() {
+  const list = document.getElementById('inventory-list');
+  if (!list) return;
+  const filter = state.inventoryFilter || 'all';
+  const filterBar = document.getElementById('inventory-filter');
+  if (filterBar) filterBar.innerHTML = [['all', 'All'], ['low', 'Low stock'], ['out', 'Out of stock']]
+    .map(([id, t]) => `<button class="seg-btn${filter === id ? ' active' : ''}" onclick="setInventoryFilter('${id}')">${t}</button>`).join('');
+
+  const term = state.inventorySearch.toLowerCase();
+  const filtered = state.products.filter(p => {
+    if (!(p.name ?? '').toLowerCase().includes(term)) return false;
+    if (filter === 'low') return p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD;
+    if (filter === 'out') return p.quantity === 0;
+    return true;
+  });
+  const count = document.getElementById('inventory-count');
+  if (count) count.textContent = filtered.length === state.products.length ? 'Sorted A–Z' : `${filtered.length} of ${state.products.length} shown`;
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📦</div><div class="empty-text">${state.products.length===0?'No products yet. Add your first product!':'No products match your search.'}</div></div></td></tr>`;
+    list.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('box', 20)}</span>
+      <span class="empty-title">${state.products.length === 0 ? 'No products yet' : 'Nothing found'}</span>
+      <span class="empty-text">${state.products.length === 0 ? 'Add your first product or record a purchase' : 'Try a different search or filter'}</span></div>`;
     return;
   }
 
-  tbody.innerHTML = filtered.map(p => {
-    const status     = p.quantity===0 ? 'out' : p.quantity<=LOW_STOCK_THRESHOLD ? 'low' : 'ok';
-    const statusText = p.quantity===0 ? 'Out of Stock' : p.quantity<=LOW_STOCK_THRESHOLD ? 'Low Stock' : 'In Stock';
+  list.innerHTML = filtered.map(p => {
+    const status     = p.quantity === 0 ? 'out' : p.quantity <= LOW_STOCK_THRESHOLD ? 'low' : 'ok';
+    const statusText = p.quantity === 0 ? 'Out of stock' : p.quantity <= LOW_STOCK_THRESHOLD ? 'Low stock' : 'In stock';
     return `
-      <tr>
-        <td style="font-weight:500;">${p.name}</td>
-        <td class="mono">${p.quantity}</td>
-        <td class="mono">${p.costPrice!=null?fmt(p.costPrice):'—'}</td>
-        <td class="mono">${p.price!=null?fmt(p.price):'—'}</td>
-        <td><span class="badge badge-${status}">${statusText}</span></td>
-        <td>
-          <div style="display:flex;gap:6px;">
-            <button class="btn btn-stock btn-sm" onclick="openPurchaseForm('${p.id}'); return false;" title="Record a purchase for this product">＋ Stock</button>
-            <button class="btn btn-danger btn-sm" onclick="confirmDeleteProduct('${p.id}','${p.name.replace(/'/g,"\\'")}'); return false;">✕ Delete</button>
-          </div>
-        </td>
-      </tr>`;
+      <div class="prod" data-product="${p.id}">
+        <div class="prod-top">
+          <span class="ic ${status === 'ok' ? 'ic-orange' : status === 'low' ? 'ic-orange' : 'ic-red'}">${ic('box')}</span>
+          <div class="sr-text"><span class="sr-title">${esc(p.name)}</span><span class="sr-sub">Buy ${p.costPrice != null ? fmt(p.costPrice) : '—'} · Sell ${p.price != null ? fmt(p.price) : '—'}</span></div>
+          <div class="prod-qty"><b>${p.quantity}</b><span class="tag ${status}">${statusText}</span></div>
+        </div>
+        <div class="prod-actions">
+          <button class="btn btn-stock btn-sm" onclick="openPurchaseForm('${p.id}'); return false;" title="Record a purchase for this product">${ic('plus', 14, 2.4)}Stock</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmDeleteProduct('${p.id}'); return false;">${ic('trash', 14)}Delete</button>
+        </div>
+      </div>`;
   }).join('');
 }
 
-function confirmDeleteProduct(id, name) {
+function confirmDeleteProduct(id) {
+  const p = state.products.find(x => x.id === id);
+  if (!p) return;
   showModal(`
-    <div class="modal-title" style="color:var(--red);">🗑 Delete Product</div>
-    <p style="font-size:14px;color:var(--text2);margin-bottom:6px;">Are you sure you want to delete:</p>
-    <div style="background:var(--red-dim);border:1px solid rgba(220,38,38,0.2);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-weight:600;color:var(--text);font-size:15px;">${name}</div>
-    <p style="font-size:12px;color:var(--text3);margin-bottom:24px;font-family:var(--mono);">This action cannot be undone.</p>
+    <div class="modal-title"><span class="ic ic-red">${ic('trash')}</span>Delete product</div>
+    <p class="modal-note">Are you sure you want to delete this product?</p>
+    <div class="danger-box">${esc(p.name)}</div>
+    <p class="modal-note">This action cannot be undone.</p>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-danger" onclick="deleteProduct('${id}')">✕ Yes, Delete</button>
+      <button class="btn btn-danger" onclick="deleteProduct('${p.id}')">Yes, delete</button>
     </div>`);
 }
 
@@ -1442,117 +1451,73 @@ function confirmDeleteProduct(id, name) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function renderSales() {
-  const container  = document.getElementById('sales-page');
-  const totalRev   = state.sales.reduce((s, x) => s + saleTotal(x), 0);
+  const container = document.getElementById('sales-page');
+  if (!container) return;
+  const totalRev = state.sales.reduce((s, x) => s + saleTotal(x), 0);
+  const sub = `${plural(state.sales.length, 'transaction')} · ${fmt(totalRev)} revenue`;
 
-  container.innerHTML = `
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:16px;">
-      <div>
-        <div class="page-title">Transaction Log</div>
-        <div class="page-sub">SALES_HISTORY // ${state.sales.length} transactions · ${fmt(totalRev)} total revenue</div>
-      </div>
-      <button class="btn btn-amber" style="padding:10px 20px;font-size:14px;" onclick="showModal(saleFormHTML()); initSaleForm(); return false;">⚡ New Sale</button>
-    </div>
-    <div style="position:relative;margin-bottom:24px;">
-      <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:15px;pointer-events:none;">🔍</span>
-      <input type="text" id="sales-search" placeholder="Search by customer, date or product…" oninput="renderSalesList()"
-        style="padding:11px 14px 11px 42px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);width:100%;outline:none;">
-    </div>
-    <div id="sales-list-container"></div>`;
-
+  if (!document.getElementById('sales-list-container')) {
+    container.innerHTML = `
+      <div class="page-head"><div class="page-head-text"><span class="page-title">Sales</span><span class="page-date" id="sales-sub"></span></div></div>
+      <div class="head-actions"><button class="btn btn-primary" onclick="showModal(saleFormHTML()); initSaleForm(); return false;">${ic('bolt')}New sale</button></div>
+      <div class="search">${ic('search', 17)}<input type="search" id="sales-search" placeholder="Search by customer, date or product…" autocomplete="off" oninput="renderSalesList()"></div>
+      <div class="box">
+        <div class="box-head"><div class="box-head-text"><span class="box-title">Transaction log</span><span class="box-sub">Newest first · tap a sale for details</span></div></div>
+        <div id="sales-list-container" class="box-list"></div>
+      </div>`;
+  }
+  document.getElementById('sales-sub').textContent = sub;
   renderSalesList();
 }
 
 function renderSalesList() {
-  const container  = document.getElementById('sales-list-container');
+  const container = document.getElementById('sales-list-container');
   if (!container) return;
 
-  const term = document.getElementById('sales-search')?.value.toLowerCase() || '';
+  const term = (document.getElementById('sales-search')?.value || '').toLowerCase();
   const filtered = state.sales.filter(s => {
     const items = s.items ?? [];
-    return (s.customerName??'').toLowerCase().includes(term) ||
-           (s.customerPhone??'').includes(term) ||
+    return (s.customerName ?? '').toLowerCase().includes(term) ||
+           (s.customerPhone ?? '').includes(term) ||
            fmtDate(recordDate(s)).toLowerCase().includes(term) ||
-           items.some(it => (it.productName??'').toLowerCase().includes(term));
+           items.some(it => (it.productName ?? '').toLowerCase().includes(term));
   });
 
   if (filtered.length === 0) {
-    container.innerHTML = `
-      <div style="text-align:center;padding:64px 24px;color:var(--text3);">
-        <div style="font-size:48px;margin-bottom:16px;">🧾</div>
-        <div style="font-size:16px;font-weight:600;color:var(--text2);margin-bottom:8px;">${state.sales.length===0?'No transactions yet':'No results found'}</div>
-        <div style="font-size:13px;">${state.sales.length===0?'Record your first sale to get started':'Try adjusting your search'}</div>
-      </div>`;
+    container.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('bolt', 20)}</span>
+      <span class="empty-title">${state.sales.length === 0 ? 'No sales yet' : 'No results found'}</span>
+      <span class="empty-text">${state.sales.length === 0 ? 'Record your first sale to get started' : 'Try adjusting your search'}</span></div>`;
     return;
   }
-
-  container.innerHTML = `<div style="display:flex;flex-direction:column;gap:12px;">${filtered.map(s=>renderSaleCard(s)).join('')}</div>`;
+  container.innerHTML = filtered.map(renderSaleCard).join('');
 }
 
 function renderSaleCard(s) {
-  const items    = s.items ?? [];
-  const total    = saleTotal(s);
-  const isOpen   = state.expandedSales[s.id];
-  const pt       = s.paymentType ?? 'cash';
-  const idx      = state.sales.findIndex(x => x.id === s.id);
-  const txnNum   = String(state.sales.length - idx).padStart(4, '0');
-
-  const payColor = {cash:'#16a34a',card:'#3b82f6',credit:'#a855f7'};
-  const payBg    = {cash:'rgba(22,163,74,0.08)',card:'rgba(59,130,246,0.08)',credit:'rgba(168,85,247,0.08)'};
-  const payIcon  = {cash:'💵',card:'💳',credit:'🏦'};
-
-  const ts = toDate(s.timestamp);
+  const items  = s.items ?? [];
+  const total  = saleTotal(s);
+  const isOpen = state.expandedSales[s.id];
+  const pt     = payOf(s);
+  const idx    = state.sales.findIndex(x => x.id === s.id);
+  const txnNum = String(state.sales.length - idx).padStart(4, '0');
+  const ts     = toDate(s.timestamp);
 
   return `
-    <div class="txn-card" style="box-shadow:${isOpen?'0 4px 20px rgba(0,0,0,0.06)':'none'};">
-      <div class="txn-card-header" onclick="toggleSaleExpand('${s.id}')">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 8px;white-space:nowrap;">#${txnNum}</div>
-        <div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span style="font-weight:600;font-size:14px;color:var(--text);">${s.customerName||'Unknown'}</span>
-            <span style="font-family:var(--mono);font-size:11px;color:var(--text3);">📅 ${fmtDate(recordDate(s))}</span>
-          </div>
-          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
-            ${items.slice(0,3).map(it=>`<span style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--text2);">${it.productName} ×${it.quantity}</span>`).join('')}
-            ${items.length>3?`<span style="font-family:var(--mono);font-size:11px;color:var(--text3);padding:2px 4px;">+${items.length-3} more</span>`:''}
-          </div>
-        </div>
-        <span style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:7px;font-size:12px;font-weight:600;font-family:var(--mono);background:${payBg[pt]};color:${payColor[pt]};white-space:nowrap;">
-          ${payIcon[pt]} ${pt.charAt(0).toUpperCase()+pt.slice(1)}
-        </span>
-        <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green);white-space:nowrap;">${fmt(total)}</div>
-        <div style="font-size:12px;color:var(--text3);transition:transform 0.2s;transform:rotate(${isOpen?'180':'0'}deg);">▾</div>
-      </div>
+    <div class="txn${isOpen ? ' open' : ''}">
+      <button class="txn-main" onclick="toggleSaleExpand('${s.id}')" aria-expanded="${isOpen ? 'true' : 'false'}">
+        <span class="ic ic-${PAY_TONE[pt]}">${ic(PAY_IC[pt])}</span>
+        <div class="sr-text"><span class="sr-title">${esc(s.customerName || 'Walk-in customer')}</span><span class="sr-sub">${fmtDate(recordDate(s))} · ${esc(itemsSummary(items))}</span></div>
+        <div class="sr-end"><span class="sr-val green">${fmt(total)}</span><span class="tag ${pt}">${PAY_NAME[pt]}</span></div>
+        <span class="txn-chev">${ic('chevron')}</span>
+      </button>
       ${isOpen ? `
-        <div style="border-top:1px solid var(--border);">
-          <div style="background:var(--bg3);padding:8px 20px;display:flex;align-items:center;gap:8px;">
-            <span style="font-size:13px;">🕐</span>
-            <span style="font-family:var(--mono);font-size:12px;color:var(--text3);">${s.saleDate ? `Sale date ${fmtDate(recordDate(s))} · recorded ` : ''}${ts.toLocaleString('en-US',{weekday:'short',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>
-            <span style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);">TXN-${s.id.toUpperCase()}</span>
-          </div>
-          <div style="padding:16px 20px;">
-            <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:10px;">Order Items</div>
-            <div style="display:flex;flex-direction:column;gap:6px;">
-              ${items.map(it=>`
-                <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
-                  <div style="display:flex;align-items:center;gap:10px;">
-                    <div style="width:32px;height:32px;border-radius:8px;background:var(--amber-glow);border:1px solid var(--amber-dim);display:flex;align-items:center;justify-content:center;font-size:14px;">📦</div>
-                    <div>
-                      <div style="font-weight:600;font-size:13px;color:var(--text);">${it.productName}</div>
-                      <div style="font-family:var(--mono);font-size:11px;color:var(--text3);">${it.quantity} unit${it.quantity>1?'s':''} × ${it.priceAtSale!=null?fmt(it.priceAtSale):'—'}</div>
-                    </div>
-                  </div>
-                  <div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text);">${it.priceAtSale!=null?fmt(it.priceAtSale*it.quantity):'—'}</div>
-                </div>`).join('')}
-            </div>
-            <div style="margin-top:12px;padding:12px 14px;background:linear-gradient(135deg,rgba(217,119,6,0.07),rgba(217,119,6,0.03));border:1px solid var(--amber-dim);border-radius:8px;display:flex;justify-content:space-between;align-items:center;">
-              <div>
-                <div style="font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);">Grand Total</div>
-                <div style="font-size:12px;color:var(--text3);margin-top:2px;">${items.length} item${items.length>1?'s':''} · paid by ${pt}</div>
-              </div>
-              <div style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--amber);">${fmt(total)}</div>
-            </div>
-          </div>
+        <div class="txn-detail">
+          <div class="txn-meta"><span>#${txnNum}</span><span>Sale date ${fmtDate(recordDate(s))}</span><span>Recorded ${ts.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span></div>
+          ${items.map(it => `
+            <div class="line-item">
+              <div class="li-text"><b>${esc(it.productName)}</b><small>${it.quantity} unit${it.quantity !== 1 ? 's' : ''} × ${it.priceAtSale != null ? fmt(it.priceAtSale) : '—'}</small></div>
+              <span class="amt">${it.priceAtSale != null ? fmt(it.priceAtSale * it.quantity) : '—'}</span>
+            </div>`).join('')}
+          <div class="txn-total"><span class="lbl">Grand total<small>${plural(items.length, 'item')} · paid by ${PAY_NAME[pt].toLowerCase()}</small></span><span class="val">${fmt(total)}</span></div>
         </div>` : ''}
     </div>`;
 }
@@ -1570,31 +1535,19 @@ function renderPurchases() {
   const container = document.getElementById('purchases-page');
   if (!container) return;
   const totalSpent = state.purchases.reduce((s, x) => s + purchaseTotal(x), 0);
-  const subText    = `PURCHASE_HISTORY // ${state.purchases.length} purchase${state.purchases.length !== 1 ? 's' : ''} · ${fmt(totalSpent)} total spent`;
+  const sub = `${plural(state.purchases.length, 'purchase')} · ${fmt(totalSpent)} total spent`;
 
-  // Page shell already built → only refresh header + list (keeps search box focus while typing)
-  const existingSub = document.getElementById('purchases-sub');
-  if (existingSub) {
-    existingSub.textContent = subText;
-    renderPurchasesList();
-    return;
+  if (!document.getElementById('purchases-list-container')) {
+    container.innerHTML = `
+      <div class="page-head"><div class="page-head-text"><span class="page-title">Purchases</span><span class="page-date" id="purchases-sub"></span></div></div>
+      <div class="head-actions"><button class="btn btn-primary" onclick="openPurchaseForm(); return false;">${ic('cart')}New purchase</button></div>
+      <div class="search">${ic('search', 17)}<input type="search" id="purchases-search" placeholder="Search by supplier, invoice or product…" autocomplete="off" oninput="renderPurchasesList()"></div>
+      <div class="box">
+        <div class="box-head"><div class="box-head-text"><span class="box-title">Purchase log</span><span class="box-sub">Every purchase adds its items to stock</span></div></div>
+        <div id="purchases-list-container" class="box-list"></div>
+      </div>`;
   }
-
-  container.innerHTML = `
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:16px;">
-      <div>
-        <div class="page-title">Purchases</div>
-        <div class="page-sub" id="purchases-sub">${subText}</div>
-      </div>
-      <button class="btn btn-amber" style="padding:10px 20px;font-size:14px;" onclick="openPurchaseForm(); return false;">🛒 New Purchase</button>
-    </div>
-    <div style="position:relative;margin-bottom:24px;">
-      <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:15px;pointer-events:none;">🔍</span>
-      <input type="text" id="purchases-search" placeholder="Search by supplier, invoice no. or product…" oninput="renderPurchasesList()"
-        style="padding:11px 14px 11px 42px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);width:100%;outline:none;">
-    </div>
-    <div id="purchases-list-container"></div>`;
-
+  document.getElementById('purchases-sub').textContent = sub;
   renderPurchasesList();
 }
 
@@ -1610,16 +1563,12 @@ function renderPurchasesList() {
     (p.items ?? []).some(it => (it.productName ?? '').toLowerCase().includes(term)));
 
   if (filtered.length === 0) {
-    container.innerHTML = `
-      <div style="text-align:center;padding:64px 24px;color:var(--text3);">
-        <div style="font-size:48px;margin-bottom:16px;">🛒</div>
-        <div style="font-size:16px;font-weight:600;color:var(--text2);margin-bottom:8px;">${state.purchases.length === 0 ? 'No purchases yet' : 'No results found'}</div>
-        <div style="font-size:13px;">${state.purchases.length === 0 ? 'Record a purchase and its items are added to stock automatically' : 'Try adjusting your search'}</div>
-      </div>`;
+    container.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('cart', 20)}</span>
+      <span class="empty-title">${state.purchases.length === 0 ? 'No purchases yet' : 'No results found'}</span>
+      <span class="empty-text">${state.purchases.length === 0 ? 'Record a purchase and its items are added to stock automatically' : 'Try adjusting your search'}</span></div>`;
     return;
   }
-
-  container.innerHTML = `<div style="display:flex;flex-direction:column;gap:12px;">${filtered.map(renderPurchaseCard).join('')}</div>`;
+  container.innerHTML = filtered.map(renderPurchaseCard).join('');
 }
 
 function renderPurchaseCard(p) {
@@ -1627,7 +1576,7 @@ function renderPurchaseCard(p) {
   const total  = purchaseTotal(p);
   const units  = purchaseUnits(p);
   const isOpen = state.expandedPurchases[p.id];
-  const pt     = PAY_COLOR[p.paymentType] ? p.paymentType : 'cash';
+  const pt     = payOf(p);
   const idx    = state.purchases.findIndex(x => x.id === p.id);
   const num    = String(state.purchases.length - idx).padStart(4, '0');
   const ts     = toDate(p.timestamp);
@@ -1635,64 +1584,24 @@ function renderPurchaseCard(p) {
   const vatAmount = typeof p.vatAmount === 'number' ? p.vatAmount : 0;
 
   return `
-    <div class="txn-card" style="box-shadow:${isOpen ? '0 4px 20px rgba(0,0,0,0.06)' : 'none'};">
-      <div class="txn-card-header" onclick="togglePurchaseExpand('${p.id}')">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 8px;white-space:nowrap;">PO-${num}</div>
-        <div>
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span style="font-weight:600;font-size:14px;color:var(--text);">🏭 ${esc(p.supplierName || 'Unknown supplier')}</span>
-            ${p.supplierPhone ? `<span style="font-family:var(--mono);font-size:11px;color:var(--text3);">${esc(p.supplierPhone)}</span>` : ''}
-            ${p.invoiceNo ? `<span style="font-family:var(--mono);font-size:10px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;">${esc(p.invoiceNo)}</span>` : ''}
-          </div>
-          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
-            ${items.slice(0, 3).map(it => `<span style="font-family:var(--mono);font-size:11px;background:var(--green-dim);border:1px solid rgba(22,163,74,0.2);border-radius:4px;padding:2px 7px;color:var(--green);">${esc(it.productName)} +${it.quantity}</span>`).join('')}
-            ${items.length > 3 ? `<span style="font-family:var(--mono);font-size:11px;color:var(--text3);padding:2px 4px;">+${items.length - 3} more</span>` : ''}
-          </div>
-        </div>
-        <span style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:7px;font-size:12px;font-weight:600;font-family:var(--mono);background:${PAY_BG[pt]};color:${PAY_COLOR[pt]};white-space:nowrap;">
-          ${PAY_ICON[pt]} ${pt.charAt(0).toUpperCase() + pt.slice(1)}
-        </span>
-        <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--purple);white-space:nowrap;">${fmt(total)}</div>
-        <div style="font-size:12px;color:var(--text3);transition:transform 0.2s;transform:rotate(${isOpen ? '180' : '0'}deg);">▾</div>
-      </div>
+    <div class="txn${isOpen ? ' open' : ''}">
+      <button class="txn-main" onclick="togglePurchaseExpand('${p.id}')" aria-expanded="${isOpen ? 'true' : 'false'}">
+        <span class="ic ic-purple">${ic('factory')}</span>
+        <div class="sr-text"><span class="sr-title">${esc(p.supplierName || 'Unknown supplier')}</span><span class="sr-sub">${fmtDate(ts)} · +${units} units${p.invoiceNo ? ` · ${esc(p.invoiceNo)}` : ''}</span></div>
+        <div class="sr-end"><span class="sr-val purple">${fmt(total)}</span><span class="tag ${pt}">${PAY_NAME[pt]}</span></div>
+        <span class="txn-chev">${ic('chevron')}</span>
+      </button>
       ${isOpen ? `
-        <div style="border-top:1px solid var(--border);">
-          <div style="background:var(--bg3);padding:8px 20px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span style="font-size:13px;">🕐</span>
-            <span style="font-family:var(--mono);font-size:12px;color:var(--text3);">${ts.toLocaleString('en-US', { weekday:'short', year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}</span>
-            <span style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);">by ${esc(p.recordedBy || 'unknown')}</span>
-          </div>
-          <div style="padding:16px 20px;">
-            <div class="section-label" style="margin-bottom:10px;">Items Added to Stock</div>
-            <div style="display:flex;flex-direction:column;gap:6px;">
-              ${items.map(it => `
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
-                  <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                    <div style="width:32px;height:32px;flex-shrink:0;border-radius:8px;background:var(--green-dim);border:1px solid rgba(22,163,74,0.25);display:flex;align-items:center;justify-content:center;font-size:14px;">📥</div>
-                    <div style="min-width:0;">
-                      <div style="font-weight:600;font-size:13px;color:var(--text);">
-                        ${esc(it.productName)}
-                        ${it.isNewProduct ? `<span style="font-family:var(--mono);font-size:9px;letter-spacing:1px;background:var(--amber-glow);color:var(--amber);border:1px solid var(--amber-dim);border-radius:4px;padding:1px 5px;margin-left:4px;">NEW</span>` : ''}
-                      </div>
-                      <div style="font-family:var(--mono);font-size:11px;color:var(--text3);"><span style="color:var(--green);font-weight:600;">+${it.quantity}</span> unit${it.quantity !== 1 ? 's' : ''} × ${fmt(it.unitCost ?? 0)}</div>
-                    </div>
-                  </div>
-                  <div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;">${fmt((it.unitCost ?? 0) * it.quantity)}</div>
-                </div>`).join('')}
-            </div>
-            <div style="margin-top:12px;padding:12px 14px;background:rgba(124,58,237,0.05);border:1px solid rgba(124,58,237,0.2);border-radius:8px;">
-              ${vatAmount > 0 ? `
-                <div class="summary-line"><span>Subtotal</span><strong>${fmt(subtotal)}</strong></div>
-                <div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                  <div class="section-label" style="margin:0;">Total Cost</div>
-                  <div style="font-size:12px;color:var(--text3);margin-top:2px;">${units} unit${units !== 1 ? 's' : ''} added · paid by ${pt}${p.vatIncluded === false ? '' : ' · VAT incl.'}</div>
-                </div>
-                <div style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--purple);">${fmt(total)}</div>
-              </div>
-            </div>
-          </div>
+        <div class="txn-detail">
+          <div class="txn-meta"><span>PO-${num}</span><span>${ts.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>${p.supplierPhone ? `<span>${esc(p.supplierPhone)}</span>` : ''}<span>by ${esc(p.recordedBy || 'unknown')}</span></div>
+          ${items.map(it => `
+            <div class="line-item">
+              <span class="ic ic-green" style="width:30px;height:30px;">${ic('inbox', 14)}</span>
+              <div class="li-text"><b>${esc(it.productName)} ${it.isNewProduct ? '<span class="tag new">NEW</span>' : ''}</b><small><span style="color:var(--green);font-weight:600;">+${it.quantity}</span> unit${it.quantity !== 1 ? 's' : ''} × ${fmt(it.unitCost ?? 0)}</small></div>
+              <span class="amt">${fmt((it.unitCost ?? 0) * it.quantity)}</span>
+            </div>`).join('')}
+          ${vatAmount > 0 ? `<div class="txn-lines"><div class="summary-line"><span>Subtotal</span><strong>${fmt(subtotal)}</strong></div><div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div></div>` : ''}
+          <div class="txn-total purple"><span class="lbl">Total cost<small>${units} unit${units !== 1 ? 's' : ''} added · paid by ${PAY_NAME[pt].toLowerCase()}</small></span><span class="val">${fmt(total)}</span></div>
         </div>` : ''}
     </div>`;
 }

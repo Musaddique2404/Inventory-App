@@ -2,13 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#d97706">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f2ef">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <title>Ateer - Inventory Management System</title>
-  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply the saved theme before first paint
+    try { if (localStorage.getItem('ateer-theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
@@ -16,60 +22,64 @@
        AUTH SCREEN
   ════════════════════════════════════════════ -->
   <div id="auth-screen">
-    <div class="auth-bg">
-      <div class="auth-card">
+    <div class="auth-wrap">
+      <div class="auth-inner">
 
-        <div class="auth-logo">
-          <div class="auth-logo-mark">Musaddique's</div>
-          <div class="auth-logo-title">Ateer</div>
-          <div class="auth-logo-desc">Inventory Management System</div>
+        <div class="auth-brand">
+          <span class="brand-mark">A</span>
+          <div class="brand-text"><span class="brand-owner">Musaddique's</span><span class="brand-name">Ateer</span></div>
         </div>
 
-        <div class="auth-tabs">
-          <button class="auth-tab active" id="tab-login"    onclick="switchAuthTab('login')">Sign In</button>
-          <button class="auth-tab"        id="tab-register" onclick="switchAuthTab('register')">Create Account</button>
+        <div class="auth-head page-head-text">
+          <span class="page-title" id="auth-title">Welcome back</span>
+          <span class="page-date" id="auth-sub">Sign in to manage your stock, sales and purchases.</span>
+        </div>
+
+        <div class="seg">
+          <button class="seg-btn active" id="tab-login"    onclick="switchAuthTab('login')">Sign in</button>
+          <button class="seg-btn"        id="tab-register" onclick="switchAuthTab('register')">Create account</button>
         </div>
 
         <!-- Login -->
-        <div id="auth-login-form">
-          <div class="auth-field">
-            <label>Email Address</label>
+        <div id="auth-login-form" class="auth-card">
+          <div class="field">
+            <label for="login-email">Email address</label>
             <input type="email"    id="login-email"    placeholder="you@example.com" autocomplete="email">
-            <span class="auth-err" id="err-login-email"></span>
+            <span class="err-msg" id="err-login-email"></span>
           </div>
-          <div class="auth-field">
-            <label>Password</label>
+          <div class="field">
+            <label for="login-password">Password</label>
             <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
-            <span class="auth-err" id="err-login-password"></span>
+            <span class="err-msg" id="err-login-password"></span>
           </div>
-          <div class="auth-err" id="err-login-general" style="margin-bottom:12px;text-align:center;"></div>
-          <button class="auth-btn" id="btn-login" onclick="handleLogin()">
-            <span id="btn-login-text">Sign In</span>
-            <span id="btn-login-spin" class="auth-spinner" style="display:none;"></span>
+          <div class="err-msg auth-general-err" id="err-login-general"></div>
+          <button class="btn btn-primary btn-block" id="btn-login" onclick="handleLogin()">
+            <span id="btn-login-text">Sign in</span>
+            <span id="btn-login-spin" class="spinner" style="display:none;"></span>
           </button>
         </div>
 
         <!-- Register -->
-        <div id="auth-register-form" style="display:none;">
-          <div class="auth-field">
-            <label>Full Name</label>
+        <div id="auth-register-form" class="auth-card" style="display:none;">
+          <div class="field">
+            <label for="reg-name">Full name</label>
             <input type="text"     id="reg-name"     placeholder="Ahmed Al-Rashid" autocomplete="name">
-            <span class="auth-err" id="err-reg-name"></span>
+            <span class="err-msg" id="err-reg-name"></span>
           </div>
-          <div class="auth-field">
-            <label>Email Address</label>
+          <div class="field">
+            <label for="reg-email">Email address</label>
             <input type="email"    id="reg-email"    placeholder="you@example.com" autocomplete="email">
-            <span class="auth-err" id="err-reg-email"></span>
+            <span class="err-msg" id="err-reg-email"></span>
           </div>
-          <div class="auth-field">
-            <label>Password <span style="font-size:10px;color:var(--text3);">(min 6 characters)</span></label>
+          <div class="field">
+            <label for="reg-password">Password <span class="hint">(min 6 characters)</span></label>
             <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password">
-            <span class="auth-err" id="err-reg-password"></span>
+            <span class="err-msg" id="err-reg-password"></span>
           </div>
-          <div class="auth-err" id="err-reg-general" style="margin-bottom:12px;text-align:center;"></div>
-          <button class="auth-btn" id="btn-register" onclick="handleRegister()">
-            <span id="btn-register-text">Create Account</span>
-            <span id="btn-register-spin" class="auth-spinner" style="display:none;"></span>
+          <div class="err-msg auth-general-err" id="err-reg-general"></div>
+          <button class="btn btn-primary btn-block" id="btn-register" onclick="handleRegister()">
+            <span id="btn-register-text">Create account</span>
+            <span id="btn-register-spin" class="spinner" style="display:none;"></span>
           </button>
         </div>
 
@@ -83,120 +93,32 @@
   ════════════════════════════════════════════ -->
   <div id="app-screen" style="display:none;">
 
-    <!-- Mobile Header -->
-    <header class="mobile-header">
-      <div>
-        <div class="logo-mark">Musaddique's</div>
-        <div class="logo-title">Ateer</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <div id="mobile-page-indicator" class="mobile-page-badge"></div>
-        <button class="logout-btn-mobile" onclick="handleLogout()" title="Sign out">⏻</button>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <span class="brand-mark">A</span>
+        <div class="brand-text"><span class="brand-owner">Musaddique's</span><span class="brand-name">Ateer</span></div>
+        <button class="round-btn" id="theme-btn" title="Theme" aria-label="Switch theme" onclick="toggleTheme()"></button>
+        <button class="round-btn" id="logout-btn" title="Sign out" aria-label="Sign out" onclick="handleLogout()"></button>
       </div>
     </header>
 
-    <div class="app">
-      <!-- Sidebar -->
-      <aside class="sidebar">
-        <div class="sidebar-logo">
-          <div class="logo-mark">Musaddique's</div>
-          <div class="logo-title">Ateer</div>
-          <div class="logo-desc">Inventory System</div>
-        </div>
-        <nav class="nav">
-          <div class="nav-label">Navigation</div>
-          <button class="nav-btn active" data-page="dashboard">
-            <span class="nav-icon">◈</span><span class="nav-text">Dashboard</span>
-          </button>
-          <button class="nav-btn" data-page="inventory">
-            <span class="nav-icon">▦</span><span class="nav-text">Inventory</span>
-          </button>
-          <button class="nav-btn" data-page="sales">
-            <span class="nav-icon">↯</span><span class="nav-text">Sales</span>
-          </button>
-          <button class="nav-btn" data-page="purchases">
-            <span class="nav-icon">↧</span><span class="nav-text">Purchases</span>
-          </button>
-        </nav>
-        <div class="sidebar-footer">
-          <div class="sidebar-footer-item" style="margin-bottom:10px;">
-            <div class="sidebar-footer-icon">📊</div>
-            <div class="sidebar-footer-text">
-              <div class="sidebar-footer-label">Total Items</div>
-              <div class="sidebar-footer-value" id="sidebar-product-count">0 Products</div>
-            </div>
-          </div>
-          <!-- User info row -->
-          <div class="sidebar-user">
-            <div class="sidebar-user-avatar" id="sidebar-avatar">?</div>
-            <div class="sidebar-user-text">
-              <div class="sidebar-user-name"  id="sidebar-user-name">—</div>
-              <div class="sidebar-user-email" id="sidebar-user-email">—</div>
-            </div>
-            <button class="sidebar-logout-btn" onclick="handleLogout()" title="Sign out">⏻</button>
-          </div>
-        </div>
-      </aside>
-
-      <!-- Main Content -->
-      <main class="main">
-        <!-- Cloud sync loading overlay -->
-        <div id="db-loading" class="db-loading-overlay">
-          <div class="db-loading-spinner"></div>
-          <div class="db-loading-text">Syncing with cloud…</div>
-        </div>
-
-        <div id="dashboard-page" class="page" style="display:block;"></div>
-
-        <div id="inventory-page" class="page" style="display:none;">
-          <div class="page-header">
-            <div class="page-title">Inventory</div>
-            <div class="page-sub" id="inventory-sub">PRODUCT_DATABASE // 0 items</div>
-          </div>
-          <div class="toolbar">
-            <div class="search-wrap">
-              <span class="search-icon">🔍</span>
-              <input type="text" id="inventory-search" placeholder="Search products…" autocomplete="off">
-            </div>
-            <button class="btn btn-amber" onclick="showModal(productFormHTML()); return false;">+ Add Product</button>
-          </div>
-          <div class="card" style="padding:0;">
-            <div class="table-wrap">
-              <table id="inventory-table">
-                <thead>
-                  <tr>
-                    <th>Product Name</th><th>Quantity</th><th>Buying Price</th>
-                    <th>Selling Price</th><th>Status</th><th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody id="inventory-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div id="sales-page" class="page" style="display:none;"></div>
-
-        <div id="purchases-page" class="page" style="display:none;"></div>
-      </main>
-    </div>
-
-    <!-- Bottom Navigation -->
-    <nav class="bottom-nav">
-      <div class="bottom-nav-inner">
-        <button class="bottom-nav-btn active" data-page="dashboard">
-          <span class="bnav-icon">◈</span><span class="bnav-label">Dashboard</span>
-        </button>
-        <button class="bottom-nav-btn" data-page="inventory">
-          <span class="bnav-icon">▦</span><span class="bnav-label">Inventory</span>
-        </button>
-        <button class="bottom-nav-btn" data-page="sales">
-          <span class="bnav-icon">↯</span><span class="bnav-label">Sales</span>
-        </button>
-        <button class="bottom-nav-btn" data-page="purchases">
-          <span class="bnav-icon">↧</span><span class="bnav-label">Purchases</span>
-        </button>
+    <main class="main">
+      <div id="db-loading" class="db-loading-overlay">
+        <div class="spinner spinner-lg"></div>
+        <div class="db-loading-text">Syncing with cloud…</div>
       </div>
+
+      <div id="dashboard-page" class="page" style="display:grid;"></div>
+      <div id="inventory-page" class="page" style="display:none;"></div>
+      <div id="sales-page"     class="page" style="display:none;"></div>
+      <div id="purchases-page" class="page" style="display:none;"></div>
+    </main>
+
+    <nav class="tabbar" aria-label="Main">
+      <button class="tab-btn active" data-page="dashboard"><span class="tab-ic" data-icon="dashboard"></span><span class="tab-label">Dashboard</span></button>
+      <button class="tab-btn" data-page="inventory"><span class="tab-ic" data-icon="box"></span><span class="tab-label">Inventory</span></button>
+      <button class="tab-btn" data-page="sales"><span class="tab-ic" data-icon="trend"></span><span class="tab-label">Sales</span></button>
+      <button class="tab-btn" data-page="purchases"><span class="tab-ic" data-icon="cart"></span><span class="tab-label">Purchases</span></button>
     </nav>
 
   </div><!-- /app-screen -->

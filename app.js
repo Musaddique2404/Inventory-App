@@ -188,6 +188,39 @@ function updateThemeChrome() {
   if (btn) btn.innerHTML = ic(isDark() ? 'sun' : 'moon', 17);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', isDark() ? '#141517' : '#f4f2ef');
+  syncStatusBar();
+}
+
+// ─── Android app (Capacitor) ─────────────────────────────────────────────────
+// When Ateer runs inside the Android app these make it behave like a native app.
+function nativePlugins() {
+  const C = window.Capacitor;
+  return C && C.isNativePlatform && C.isNativePlatform() ? (C.Plugins || {}) : null;
+}
+
+function syncStatusBar() {
+  const P = nativePlugins();
+  if (!P || !P.StatusBar) return;
+  const dark = isDark();
+  P.StatusBar.setStyle({ style: dark ? 'DARK' : 'LIGHT' }).catch(() => {});
+  P.StatusBar.setBackgroundColor({ color: dark ? '#141517' : '#f4f2ef' }).catch(() => {});
+}
+
+function initNativeApp() {
+  const P = nativePlugins();
+  if (!P) return;
+  document.documentElement.classList.add('native-app');
+  syncStatusBar();
+  if (P.SplashScreen) P.SplashScreen.hide().catch(() => {});
+
+  // Android back button: close sheet/pop-up → go to Dashboard → leave the app
+  if (P.App) P.App.addListener('backButton', () => {
+    if (state.sheet) { closeSheet(); return; }
+    const mc = document.getElementById('modal-container');
+    if (mc && mc.innerHTML.trim()) { closeModal(); return; }
+    if (state.currentUser && state.currentPage !== 'dashboard') { navigateTo('dashboard'); return; }
+    P.App.exitApp();
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1964,3 +1997,6 @@ function togglePurchaseExpand(id) {
   state.expandedPurchases[id] = !state.expandedPurchases[id];
   renderPurchasesList();
 }
+
+// Start native integration when running inside the Android app
+initNativeApp();

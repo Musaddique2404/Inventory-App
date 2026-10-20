@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// STOCKCONTROL — Firebase Auth + Firestore (Per-User Data Isolation)
+// ATEER — Firebase Auth + Firestore (Per-User Data Isolation)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const firebaseConfig = {
@@ -18,14 +18,14 @@ const auth = firebase.auth();
 const db   = firebase.firestore();
 
 // ─── Per-user collection helpers ─────────────────────────────────────────────
-// All data is stored under: users/{userId}/products  &  users/{userId}/sales
+// All data is stored under: users/{userId}/products, /sales and /purchases
 // This ensures each account has completely private, isolated data.
-function userProductsCol() {
-  return db.collection('users').doc(state.currentUser.uid).collection('products');
+function userCol(name) {
+  return db.collection('users').doc(state.currentUser.uid).collection(name);
 }
-function userSalesCol() {
-  return db.collection('users').doc(state.currentUser.uid).collection('sales');
-}
+function userProductsCol()  { return userCol('products'); }
+function userSalesCol()     { return userCol('sales'); }
+function userPurchasesCol() { return userCol('purchases'); }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const LOW_STOCK_THRESHOLD = 5;
@@ -40,14 +40,18 @@ let state = {
   currentPage: 'dashboard',
   products: [],
   sales: [],
+  purchases: [],
   expandedSales: {},
+  expandedPurchases: {},
   inventorySearch: '',
   dateFilter: 'today',
   customDateStart: new Date().toISOString().slice(0, 10),
   customDateEnd:   new Date().toISOString().slice(0, 10),
   currentUser: null,
+  // Firestore real-time listener unsubscribers
   _unsubProducts: null,
   _unsubSales: null,
+  _unsubPurchases: null,
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -55,15 +59,52 @@ function fmt(num) {
   return `SAR ${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// Escape user-typed text before putting it into HTML / attribute values
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function uid() {
+  return crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substr(2, 9);
+}
+
+function toDate(ts) {
+  if (!ts) return new Date();               // pending server timestamp
+  return ts.toDate ? ts.toDate() : new Date(ts);
+}
+
+// Today's date as YYYY-MM-DD in the user's local timezone
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The date a sale/purchase belongs to: the chosen sale date, else when it was recorded
+function recordDate(r) {
+  if (r.saleDate) {
+    const [y, m, d] = r.saleDate.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+  return toDate(r.timestamp);
+}
+
+function fmtDate(date) {
+  return date.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // AUTH LAYER
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Switch between Sign In / Create Account tabs
 function switchAuthTab(tab) {
   document.getElementById('auth-login-form').style.display    = tab === 'login'    ? '' : 'none';
   document.getElementById('auth-register-form').style.display = tab === 'register' ? '' : 'none';
   document.getElementById('tab-login').classList.toggle('active',    tab === 'login');
   document.getElementById('tab-register').classList.toggle('active', tab === 'register');
+  // Clear errors on tab switch
   ['err-login-email','err-login-password','err-login-general',
    'err-reg-name','err-reg-email','err-reg-password','err-reg-general'].forEach(id => {
     const el = document.getElementById(id);
@@ -75,7 +116,7 @@ function setAuthLoading(form, loading) {
   const btn  = document.getElementById(`btn-${form}`);
   const txt  = document.getElementById(`btn-${form}-text`);
   const spin = document.getElementById(`btn-${form}-spin`);
-  btn.disabled       = loading;
+  btn.disabled    = loading;
   txt.style.display  = loading ? 'none' : '';
   spin.style.display = loading ? ''     : 'none';
 }
@@ -96,6 +137,7 @@ async function handleLogin() {
   setAuthLoading('login', true);
   try {
     await auth.signInWithEmailAndPassword(email, password);
+    // onAuthStateChanged handles the rest
   } catch (e) {
     document.getElementById('err-login-general').textContent = friendlyAuthError(e.code);
     setAuthLoading('login', false);
@@ -111,15 +153,16 @@ async function handleRegister() {
   ['err-reg-name','err-reg-email','err-reg-password','err-reg-general'].forEach(id =>
     document.getElementById(id).textContent = '');
 
-  if (!name)               { document.getElementById('err-reg-name').textContent     = 'Name is required';  valid = false; }
-  if (!email)              { document.getElementById('err-reg-email').textContent    = 'Email is required'; valid = false; }
-  if (password.length < 6) { document.getElementById('err-reg-password').textContent = 'Min 6 characters';  valid = false; }
+  if (!name)              { document.getElementById('err-reg-name').textContent     = 'Name is required';         valid = false; }
+  if (!email)             { document.getElementById('err-reg-email').textContent    = 'Email is required';        valid = false; }
+  if (password.length < 6){ document.getElementById('err-reg-password').textContent = 'Min 6 characters';         valid = false; }
   if (!valid) return;
 
   setAuthLoading('register', true);
   try {
     const cred = await auth.createUserWithEmailAndPassword(email, password);
     await cred.user.updateProfile({ displayName: name });
+    // onAuthStateChanged handles the rest
   } catch (e) {
     document.getElementById('err-reg-general').textContent = friendlyAuthError(e.code);
     setAuthLoading('register', false);
@@ -127,21 +170,25 @@ async function handleRegister() {
 }
 
 async function handleLogout() {
+  // Detach Firestore listeners before signing out
   if (state._unsubProducts) { state._unsubProducts(); state._unsubProducts = null; }
   if (state._unsubSales)    { state._unsubSales();    state._unsubSales    = null; }
+  if (state._unsubPurchases){ state._unsubPurchases(); state._unsubPurchases = null; }
   await auth.signOut();
 }
 
 function friendlyAuthError(code) {
   const map = {
-    'auth/user-not-found':         'No account found with this email.',
-    'auth/wrong-password':         'Incorrect password.',
-    'auth/invalid-email':          'Invalid email address.',
-    'auth/email-already-in-use':   'This email is already registered.',
-    'auth/weak-password':          'Password is too weak.',
-    'auth/too-many-requests':      'Too many attempts. Try again later.',
+    'auth/user-not-found':       'No account found with this email.',
+    'auth/wrong-password':       'Incorrect password.',
+    'auth/invalid-email':        'Invalid email address.',
+    'auth/email-already-in-use': 'This email is already registered.',
+    'auth/weak-password':        'Password is too weak.',
+    'auth/too-many-requests':    'Too many attempts. Try again later.',
+    'auth/invalid-credential':     'Incorrect email or password.',
+    'auth/invalid-login-credentials': 'Incorrect email or password.',
+    'auth/user-disabled':          'This account has been disabled.',
     'auth/network-request-failed': 'Network error. Check your connection.',
-    'auth/invalid-credential':     'Invalid email or password.',
   };
   return map[code] || 'Something went wrong. Please try again.';
 }
@@ -162,6 +209,7 @@ auth.onAuthStateChanged(user => {
 function showAuthScreen() {
   document.getElementById('auth-screen').style.display = '';
   document.getElementById('app-screen').style.display  = 'none';
+  // Reset login button state in case it was stuck loading
   setAuthLoading('login',    false);
   setAuthLoading('register', false);
 }
@@ -170,15 +218,18 @@ function showAppScreen(user) {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app-screen').style.display  = '';
 
-  const name     = user.displayName || user.email;
-  const email    = user.email;
+  // Sidebar user info
+  const name  = user.displayName || user.email;
+  const email = user.email;
   const initials = name.charAt(0).toUpperCase();
 
   document.getElementById('sidebar-avatar').textContent     = initials;
   document.getElementById('sidebar-user-name').textContent  = name;
   document.getElementById('sidebar-user-email').textContent = email;
 
+  // Setup nav buttons (once)
   document.querySelectorAll('.nav-btn, .bottom-nav-btn').forEach(btn => {
+    // Clone to remove old listeners
     const fresh = btn.cloneNode(true);
     btn.parentNode.replaceChild(fresh, btn);
     fresh.addEventListener('click', () => navigateTo(fresh.dataset.page));
@@ -188,11 +239,11 @@ function showAppScreen(user) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// FIRESTORE — REAL-TIME LISTENERS (per-user subcollections)
+// FIRESTORE — REAL-TIME LISTENERS
 // ══════════════════════════════════════════════════════════════════════════════
 
 function startFirestoreListeners() {
-  // ── Products: users/{uid}/products ──
+  // Products listener
   state._unsubProducts = userProductsCol()
     .orderBy('name')
     .onSnapshot(snap => {
@@ -206,22 +257,36 @@ function startFirestoreListeners() {
       showDbLoading(false);
     });
 
-  // ── Sales: users/{uid}/sales ──
+  // Sales listener — sorted newest first
   state._unsubSales = userSalesCol()
     .orderBy('timestamp', 'desc')
     .onSnapshot(snap => {
-      state.sales = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      state.sales = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => recordDate(b) - recordDate(a) || toDate(b.timestamp) - toDate(a.timestamp));
       renderCurrentPage();
     }, err => {
       console.error('Sales listener error:', err);
     });
+
+  // Purchases listener — sorted newest first
+  state._unsubPurchases = userPurchasesCol()
+    .orderBy('timestamp', 'desc')
+    .onSnapshot(snap => {
+      state.purchases = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderCurrentPage();
+    }, err => {
+      console.error('Purchases listener error:', err);
+      showToast('Failed to load purchases', 'error');
+    });
 }
 
 function stopFirestoreListeners() {
-  if (state._unsubProducts) { state._unsubProducts(); state._unsubProducts = null; }
-  if (state._unsubSales)    { state._unsubSales();    state._unsubSales    = null; }
-  state.products = [];
-  state.sales    = [];
+  if (state._unsubProducts)  { state._unsubProducts();  state._unsubProducts  = null; }
+  if (state._unsubSales)     { state._unsubSales();     state._unsubSales     = null; }
+  if (state._unsubPurchases) { state._unsubPurchases(); state._unsubPurchases = null; }
+  state.products  = [];
+  state.sales     = [];
+  state.purchases = [];
 }
 
 function showDbLoading(visible) {
@@ -230,7 +295,7 @@ function showDbLoading(visible) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PRODUCT OPERATIONS — write to users/{uid}/products
+// PRODUCT OPERATIONS (Firestore)
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function addProduct(data) {
@@ -242,6 +307,7 @@ async function addProduct(data) {
     });
     closeModal();
     showToast('Product added successfully');
+    // Real-time listener refreshes state automatically
   } catch (e) {
     console.error(e);
     showToast('Failed to add product', 'error');
@@ -274,13 +340,13 @@ async function deleteProduct(id) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SALE OPERATIONS — write to users/{uid}/sales
+// SALE OPERATIONS (Firestore)
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function recordSale(data) {
   const batch = db.batch();
 
-  // Sale document under this user's subcollection
+  // Write the sale document
   const saleRef = userSalesCol().doc();
   batch.set(saleRef, {
     ...data,
@@ -288,7 +354,7 @@ async function recordSale(data) {
     timestamp: firebase.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Decrement stock in this user's products subcollection
+  // Decrement stock for each item
   data.items.forEach(item => {
     const productRef = userProductsCol().doc(item.productId);
     batch.update(productRef, {
@@ -309,17 +375,79 @@ async function recordSale(data) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// PURCHASE OPERATIONS (Firestore)
+// Every purchase ADDS its quantities to stock in the same atomic batch.
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function recordPurchase(data, { updateCostPrice = true } = {}) {
+  const batch = db.batch();
+  const now   = firebase.firestore.FieldValue.serverTimestamp();
+
+  const items = data.items.map(item => {
+    // Brand-new product bought for the first time → create it with the purchased qty
+    if (item.isNew) {
+      const productRef = userProductsCol().doc();
+      batch.set(productRef, {
+        name:      item.productName,
+        quantity:  item.quantity,
+        costPrice: item.unitCost,
+        price:     item.sellingPrice ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { productId: productRef.id, productName: item.productName, quantity: item.quantity, unitCost: item.unitCost, isNewProduct: true };
+    }
+
+    // Existing product → increment stock (and optionally refresh its buying price)
+    const productRef = userProductsCol().doc(item.productId);
+    const update = {
+      quantity:  firebase.firestore.FieldValue.increment(item.quantity),
+      updatedAt: now,
+    };
+    if (updateCostPrice) update.costPrice = item.unitCost;
+    batch.update(productRef, update);
+    return { productId: item.productId, productName: item.productName, quantity: item.quantity, unitCost: item.unitCost };
+  });
+
+  const purchaseRef = userPurchasesCol().doc();
+  batch.set(purchaseRef, {
+    supplierName:  data.supplierName,
+    supplierPhone: data.supplierPhone,
+    invoiceNo:     data.invoiceNo,
+    paymentType:   data.paymentType,
+    vatIncluded:   data.vatIncluded,
+    subtotal:      data.subtotal,
+    vatAmount:     data.vatAmount,
+    total:         data.total,
+    items,
+    recordedBy: state.currentUser?.email || 'unknown',
+    timestamp:  now,
+  });
+
+  try {
+    await batch.commit();
+    closeModal();
+    const units = items.reduce((s, it) => s + it.quantity, 0);
+    showToast(`Purchase recorded — ${units} unit${units !== 1 ? 's' : ''} added to stock`);
+  } catch (e) {
+    console.error(e);
+    showToast('Failed to record purchase', 'error');
+    setPurchaseSubmitting(false);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // UI HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
 
 function showToast(message, type = 'success') {
   const area  = document.getElementById('toast-area');
   const toast = document.createElement('div');
-  toast.className   = `toast toast-${type}`;
+  toast.className = `toast toast-${type}`;
   toast.textContent = `${type === 'success' ? '✓' : '✕'} ${message}`;
   area.appendChild(toast);
   setTimeout(() => {
-    toast.style.opacity   = '0';
+    toast.style.opacity = '0';
     toast.style.transition = 'opacity 0.2s';
     setTimeout(() => toast.remove(), 200);
   }, 3000);
@@ -355,7 +483,7 @@ function navigateTo(page) {
 
   const indicator = document.getElementById('mobile-page-indicator');
   if (indicator) {
-    indicator.textContent = { dashboard: 'Dashboard', inventory: 'Inventory', sales: 'Sales' }[page] || '';
+    indicator.textContent = { dashboard: 'Dashboard', inventory: 'Inventory', sales: 'Sales', purchases: 'Purchases' }[page] || '';
   }
 
   document.querySelectorAll('.page').forEach(p => (p.style.display = 'none'));
@@ -369,7 +497,12 @@ function renderCurrentPage() {
     case 'dashboard': renderDashboard();  break;
     case 'inventory': renderInventory();  break;
     case 'sales':     renderSales();      break;
+    case 'purchases': renderPurchases();  break;
   }
+  // Keep an open purchase form in sync when products change in real time
+  // (skipped while the user is typing in it, so no keystrokes are lost)
+  const pc = document.getElementById('purchase-items-container');
+  if (pc && !pc.contains(document.activeElement)) renderPurchaseItems();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -436,9 +569,9 @@ function saleFormHTML() {
             <span class="err-msg" id="err-customer-name"></span>
           </div>
           <div class="field">
-            <label>Phone <span class="req">*</span></label>
-            <input type="text" id="customer-phone" placeholder="+966 5XX XXX XXXX">
-            <span class="err-msg" id="err-phone"></span>
+            <label>Date <span class="req">*</span></label>
+            <input type="date" id="sale-date" value="${todayISO()}" max="${todayISO()}">
+            <span class="err-msg" id="err-sale-date"></span>
           </div>
         </div>
       </div>
@@ -631,23 +764,23 @@ function updateSaleFormSummary() {
 
 function submitSale() {
   const customerName = document.getElementById('customer-name').value.trim();
-  const phone        = document.getElementById('customer-phone').value.trim();
+  const saleDate     = document.getElementById('sale-date').value;
   let errors = {};
 
   if (!customerName) errors.customerName = 'Customer name is required';
-  if (!phone)        errors.phone = 'Phone number is required';
-  else if (!/^\+?[\d\s\-().]{7,15}$/.test(phone)) errors.phone = 'Enter a valid phone number';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(saleDate)) errors.saleDate = 'Select a date';
+  else if (saleDate > todayISO())             errors.saleDate = 'Date cannot be in the future';
 
   saleFormState.items.forEach((item, i) => {
     const product = state.products.find(p => p.id === item.productId);
-    if (!item.productId)                                       errors[`p_${i}`] = 'Select a product';
-    if (!item.qty || isNaN(item.qty) || Number(item.qty) <= 0) errors[`q_${i}`] = 'Enter qty > 0';
-    else if (product && Number(item.qty) > product.quantity)   errors[`q_${i}`] = `Max ${product.quantity}`;
-    if (!item.price || isNaN(item.price) || Number(item.price) < 0) errors[`s_${i}`] = 'Enter price';
+    if (!item.productId)                                      errors[`p_${i}`] = 'Select a product';
+    if (!item.qty || isNaN(item.qty) || Number(item.qty)<=0) errors[`q_${i}`] = 'Enter qty > 0';
+    else if (product && Number(item.qty) > product.quantity)  errors[`q_${i}`] = `Max ${product.quantity}`;
+    if (!item.price || isNaN(item.price) || Number(item.price)<0) errors[`s_${i}`] = 'Enter price';
   });
 
   document.getElementById('err-customer-name').textContent = errors.customerName || '';
-  document.getElementById('err-phone').textContent         = errors.phone        || '';
+  document.getElementById('err-sale-date').textContent     = errors.saleDate     || '';
 
   if (Object.keys(errors).length > 0) { showToast('Please fix validation errors', 'error'); return; }
 
@@ -656,17 +789,379 @@ function submitSale() {
     return { productId: item.productId, productName: product.name, quantity: Number(item.qty), priceAtSale: Number(item.price) };
   });
 
-  recordSale({ customerName, customerPhone: phone, paymentType: saleFormState.paymentType, vatIncluded: saleFormState.vatIncluded, items: lineItems });
+  recordSale({ customerName, saleDate, paymentType: saleFormState.paymentType, vatIncluded: saleFormState.vatIncluded, items: lineItems });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PURCHASE FORM
+// ══════════════════════════════════════════════════════════════════════════════
+
+const NEW_PRODUCT = '__new__';
+const VAT_RATE    = 0.15;
+const PAY_COLOR = { cash: '#16a34a', card: '#3b82f6', credit: '#a855f7' };
+const PAY_BG    = { cash: 'rgba(22,163,74,0.08)', card: 'rgba(59,130,246,0.08)', credit: 'rgba(168,85,247,0.08)' };
+const PAY_ICON  = { cash: '💵', card: '💳', credit: '🏦' };
+
+let purchaseFormState = { items: [], paymentType: 'cash', vatIncluded: true, updateCostPrice: true, errors: {}, submitting: false };
+
+function openPurchaseForm(productId = '') {
+  showModal(purchaseFormHTML());
+  initPurchaseForm(productId);
+}
+
+function purchaseFormHTML() {
+  const suppliers = [...new Set(state.purchases.map(p => p.supplierName).filter(Boolean))];
+  return `
+    <div class="modal-title">🛒 Record New Purchase</div>
+    <div class="purchase-form" style="max-height:75vh;overflow-y:auto;padding-right:4px;">
+      <div class="purchase-note">📥 Every item in this purchase is <strong>added to stock</strong> as soon as you save it.</div>
+
+      <div class="form-section">
+        <div class="section-label"><span>🏭</span> Supplier Information</div>
+        <div class="supplier-grid">
+          <div class="field supplier-name-field">
+            <label>Supplier Name <span class="req">*</span></label>
+            <input type="text" id="supplier-name" list="supplier-list" placeholder="e.g. Al-Jazeera Trading" autocomplete="off">
+            <datalist id="supplier-list">${suppliers.map(s => `<option value="${esc(s)}">`).join('')}</datalist>
+            <span class="err-msg" id="err-supplier-name"></span>
+          </div>
+          <div class="field">
+            <label>Phone (optional)</label>
+            <input type="text" id="supplier-phone" placeholder="+966 5XX XXX XXXX">
+            <span class="err-msg" id="err-supplier-phone"></span>
+          </div>
+          <div class="field">
+            <label>Invoice / Ref No. (optional)</label>
+            <input type="text" id="supplier-invoice" placeholder="INV-1001">
+          </div>
+        </div>
+      </div>
+
+      <div class="form-divider"></div>
+
+      <div class="form-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <div class="section-label" style="margin:0;"><span>📦</span> Items (<span id="purchase-item-count">1</span>)</div>
+          <button type="button" class="add-item-btn" onclick="addPurchaseItem()">+ ADD ITEM</button>
+        </div>
+        <div class="purchase-row purchase-row-head">
+          <span>Product</span><span>Qty</span><span>Cost/Unit</span><span></span>
+        </div>
+        <div id="purchase-items-container"></div>
+      </div>
+
+      <div class="form-divider"></div>
+
+      <div class="form-section">
+        <div class="section-label"><span>💰</span> Payment &amp; Options</div>
+        <label class="option-check">
+          <input type="checkbox" id="purchase-vat-included" checked>
+          <div style="flex:1;">
+            <div class="option-check-title">VAT Included in Cost</div>
+            <div class="option-check-desc" id="purchase-vat-description">Costs already include 15% VAT</div>
+          </div>
+        </label>
+        <label class="option-check">
+          <input type="checkbox" id="purchase-update-cost" checked>
+          <div style="flex:1;">
+            <div class="option-check-title">Update Buying Price in Inventory</div>
+            <div class="option-check-desc">Set each product's buying price to this purchase's unit cost</div>
+          </div>
+        </label>
+        <div id="purchase-payment-types" style="display:flex;gap:10px;margin-top:4px;"></div>
+      </div>
+
+      <div id="purchase-summary"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button type="button" class="btn btn-amber" id="btn-submit-purchase" onclick="submitPurchase()" style="padding:10px 24px;font-size:14px;">🛒 Record Purchase</button>
+      </div>
+    </div>`;
+}
+
+function newPurchaseItem(productId = '') {
+  const product = state.products.find(p => p.id === productId);
+  return {
+    id: uid(),
+    productId: product ? product.id : '',
+    isNew: false,
+    newName: '',
+    sellingPrice: '',
+    qty: '',
+    cost: product?.costPrice != null ? String(product.costPrice) : '',
+  };
+}
+
+function initPurchaseForm(productId = '') {
+  purchaseFormState = {
+    items: [newPurchaseItem(productId)],
+    paymentType: 'cash',
+    vatIncluded: true,
+    updateCostPrice: true,
+    errors: {},
+    submitting: false,
+  };
+  renderPurchaseItems();
+  renderPurchasePaymentTypes();
+  updatePurchaseSummary();
+
+  document.getElementById('purchase-vat-included')?.addEventListener('change', e => {
+    purchaseFormState.vatIncluded = e.target.checked;
+    const desc = document.getElementById('purchase-vat-description');
+    if (desc) desc.textContent = purchaseFormState.vatIncluded
+      ? 'Costs already include 15% VAT'
+      : '15% VAT will be added to total';
+    updatePurchaseSummary();
+  });
+  document.getElementById('purchase-update-cost')?.addEventListener('change', e => {
+    purchaseFormState.updateCostPrice = e.target.checked;
+  });
+}
+
+function addPurchaseItem() {
+  purchaseFormState.items.push(newPurchaseItem());
+  renderPurchaseItems();
+  updatePurchaseSummary();
+}
+
+function removePurchaseItem(itemId) {
+  if (purchaseFormState.items.length > 1) {
+    purchaseFormState.items = purchaseFormState.items.filter(it => it.id !== itemId);
+    delete purchaseFormState.errors[itemId];
+    renderPurchaseItems();
+    updatePurchaseSummary();
+  }
+}
+
+function updatePurchaseItem(itemId, field, value) {
+  const item = purchaseFormState.items.find(it => it.id === itemId);
+  if (!item) return;
+
+  if (field === 'productId') {
+    if (value === NEW_PRODUCT) {
+      item.isNew = true;
+      item.productId = '';
+      item.cost = '';
+    } else {
+      const product = state.products.find(p => p.id === value);
+      item.isNew = false;
+      item.newName = '';
+      item.sellingPrice = '';
+      item.productId = value;
+      item.cost = product?.costPrice != null ? String(product.costPrice) : '';
+    }
+  } else {
+    item[field] = value;
+  }
+  delete purchaseFormState.errors[itemId];
+  renderPurchaseItems();
+  updatePurchaseSummary();
+}
+
+function renderPurchaseItems() {
+  const container = document.getElementById('purchase-items-container');
+  if (!container) return;
+
+  const usedIds = purchaseFormState.items.map(it => it.productId).filter(Boolean);
+  const single  = purchaseFormState.items.length === 1;
+
+  container.innerHTML = purchaseFormState.items.map(item => {
+    const product  = state.products.find(p => p.id === item.productId);
+    const qty      = Number(item.qty);
+    const cost     = Number(item.cost);
+    const validQty = item.qty !== '' && Number.isInteger(qty) && qty > 0;
+    const lineTotal = validQty && item.cost !== '' && !isNaN(cost) && cost >= 0 ? qty * cost : null;
+    const active   = item.isNew || !!item.productId;
+    const err      = purchaseFormState.errors[item.id];
+
+    const productCell = item.isNew ? `
+      <div class="new-product-input">
+        <input type="text" value="${esc(item.newName)}" placeholder="New product name"
+          onchange="updatePurchaseItem('${item.id}','newName',this.value)">
+        <button type="button" title="Pick an existing product instead"
+          onclick="updatePurchaseItem('${item.id}','productId','')">↺</button>
+      </div>` : `
+      <select onchange="updatePurchaseItem('${item.id}','productId',this.value)">
+        <option value="">— Select product —</option>
+        ${state.products.map(p => {
+          const taken = usedIds.includes(p.id) && p.id !== item.productId;
+          return `<option value="${p.id}" ${item.productId === p.id ? 'selected' : ''} ${taken ? 'disabled' : ''}>${esc(p.name)} (${p.quantity} in stock)</option>`;
+        }).join('')}
+        <option value="${NEW_PRODUCT}">➕ New product…</option>
+      </select>`;
+
+    let stockHint = '';
+    if (product) {
+      stockHint = validQty
+        ? `${product.quantity} in stock → <strong style="color:var(--green);">${product.quantity + qty}</strong> after purchase`
+        : `${product.quantity} in stock`;
+    } else if (item.isNew) {
+      stockHint = `New product — will be added to inventory${validQty ? ` with <strong style="color:var(--green);">${qty}</strong> in stock` : ''}`;
+    }
+
+    return `
+      <div class="purchase-item${err ? ' has-error' : ''}">
+        <div class="purchase-row">
+          <div class="purchase-product">${productCell}</div>
+          <input type="number" min="1" step="1" value="${esc(item.qty)}" placeholder="Qty"
+            onchange="updatePurchaseItem('${item.id}','qty',this.value)" ${active ? '' : 'disabled'}>
+          <div class="sar-input">
+            <span>SAR</span>
+            <input type="number" min="0" step="0.01" value="${esc(item.cost)}" placeholder="0.00"
+              onchange="updatePurchaseItem('${item.id}','cost',this.value)" ${active ? '' : 'disabled'}>
+          </div>
+          <button type="button" class="row-remove-btn" onclick="removePurchaseItem('${item.id}')" ${single ? 'disabled' : ''}>✕</button>
+        </div>
+        ${item.isNew ? `
+          <div class="new-product-extra">
+            <label>Selling price (optional)</label>
+            <div class="sar-input">
+              <span>SAR</span>
+              <input type="number" min="0" step="0.01" value="${esc(item.sellingPrice)}" placeholder="0.00"
+                onchange="updatePurchaseItem('${item.id}','sellingPrice',this.value)">
+            </div>
+          </div>` : ''}
+        <div class="purchase-item-meta">
+          <span>${stockHint}</span>
+          ${lineTotal !== null ? `<span>${qty} × ${fmt(cost)} = <strong style="color:var(--amber);">${fmt(lineTotal)}</strong></span>` : ''}
+        </div>
+        ${err ? `<div class="err-msg" style="margin-top:4px;">${esc(err)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  const el = document.getElementById('purchase-item-count');
+  if (el) el.textContent = purchaseFormState.items.length;
+}
+
+function renderPurchasePaymentTypes() {
+  const container = document.getElementById('purchase-payment-types');
+  if (!container) return;
+  container.innerHTML = PAYMENT_TYPES.map(pt => {
+    const on = purchaseFormState.paymentType === pt.id;
+    return `
+      <button type="button" class="pay-type-btn${on ? ' active' : ''}"
+        onclick="purchaseFormState.paymentType='${pt.id}'; renderPurchasePaymentTypes();">
+        <span style="font-size:20px;">${pt.icon}</span>${pt.label}
+      </button>`;
+  }).join('');
+}
+
+function purchaseFormTotals() {
+  const subtotal = purchaseFormState.items.reduce((s, i) => {
+    const line = Number(i.qty) * Number(i.cost);
+    return s + (isNaN(line) ? 0 : line);
+  }, 0);
+  const vatAmount = purchaseFormState.vatIncluded ? 0 : subtotal * VAT_RATE;
+  const units = purchaseFormState.items.reduce((s, i) => s + (Number(i.qty) > 0 ? Number(i.qty) : 0), 0);
+  return { subtotal, vatAmount, total: subtotal + vatAmount, units };
+}
+
+function updatePurchaseSummary() {
+  const container = document.getElementById('purchase-summary');
+  if (!container) return;
+  const { subtotal, vatAmount, total, units } = purchaseFormTotals();
+  const n = purchaseFormState.items.length;
+
+  container.innerHTML = `
+    <div class="order-summary-box">
+      <div class="section-label" style="margin-bottom:12px;">Purchase Summary</div>
+      <div class="summary-line"><span>Units added to stock</span><strong style="color:var(--green);">+${units}</strong></div>
+      <div class="summary-line"><span>Subtotal (${n} item${n !== 1 ? 's' : ''})</span><strong>${fmt(subtotal)}</strong></div>
+      ${!purchaseFormState.vatIncluded ? `<div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
+      <div class="summary-total">
+        <span>Total Cost</span>
+        <span class="summary-total-value">${fmt(total)}</span>
+      </div>
+    </div>`;
+}
+
+function setPurchaseSubmitting(on) {
+  purchaseFormState.submitting = on;
+  const btn = document.getElementById('btn-submit-purchase');
+  if (btn) {
+    btn.disabled = on;
+    btn.textContent = on ? 'Saving…' : '🛒 Record Purchase';
+  }
+}
+
+function submitPurchase() {
+  if (purchaseFormState.submitting) return;   // prevent double stock-in on double click
+
+  const supplierName  = document.getElementById('supplier-name').value.trim();
+  const supplierPhone = document.getElementById('supplier-phone').value.trim();
+  const invoiceNo     = document.getElementById('supplier-invoice').value.trim();
+  const errors = {};
+  const rowErrors = {};
+
+  if (!supplierName) errors.supplierName = 'Supplier name is required';
+  if (supplierPhone && !/^\+?[\d\s\-().]{7,15}$/.test(supplierPhone)) errors.supplierPhone = 'Enter a valid phone number';
+
+  const newNames = new Set();
+  purchaseFormState.items.forEach(item => {
+    const errs = [];
+    if (item.isNew) {
+      const name = item.newName.trim();
+      if (!name) errs.push('Enter the new product name');
+      else if (state.products.some(p => (p.name ?? '').trim().toLowerCase() === name.toLowerCase()))
+        errs.push(`"${name}" already exists — pick it from the list`);
+      else if (newNames.has(name.toLowerCase())) errs.push('Same new product added twice');
+      newNames.add(name.toLowerCase());
+      if (item.sellingPrice !== '' && (isNaN(item.sellingPrice) || Number(item.sellingPrice) < 0)) errs.push('Invalid selling price');
+    } else if (!item.productId) {
+      errs.push('Select a product');
+    } else if (!state.products.some(p => p.id === item.productId)) {
+      errs.push('This product was deleted — choose another');
+    }
+    const qty = Number(item.qty);
+    if (item.qty === '' || !Number.isInteger(qty) || qty <= 0) errs.push('Qty must be a whole number above 0');
+    if (item.cost === '' || isNaN(item.cost) || Number(item.cost) < 0) errs.push('Enter unit cost');
+    if (errs.length) rowErrors[item.id] = errs.join(' · ');
+  });
+
+  document.getElementById('err-supplier-name').textContent  = errors.supplierName  || '';
+  document.getElementById('err-supplier-phone').textContent = errors.supplierPhone || '';
+  purchaseFormState.errors = rowErrors;
+  renderPurchaseItems();
+
+  if (Object.keys(errors).length || Object.keys(rowErrors).length) {
+    showToast('Please fix validation errors', 'error');
+    return;
+  }
+
+  const items = purchaseFormState.items.map(item => {
+    if (item.isNew) {
+      return {
+        isNew: true,
+        productName: item.newName.trim(),
+        quantity: Number(item.qty),
+        unitCost: Number(item.cost),
+        sellingPrice: item.sellingPrice !== '' ? Number(item.sellingPrice) : null,
+      };
+    }
+    const product = state.products.find(p => p.id === item.productId);
+    return { productId: item.productId, productName: product.name, quantity: Number(item.qty), unitCost: Number(item.cost) };
+  });
+
+  const { subtotal, vatAmount, total } = purchaseFormTotals();
+  setPurchaseSubmitting(true);
+  recordPurchase(
+    { supplierName, supplierPhone, invoiceNo, paymentType: purchaseFormState.paymentType,
+      vatIncluded: purchaseFormState.vatIncluded, subtotal, vatAmount, total, items },
+    { updateCostPrice: purchaseFormState.updateCostPrice },
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DATE FILTER HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
 
-function getFilteredSales() {
+function getFilteredSales()     { return filterByDate(state.sales); }
+function getFilteredPurchases() { return filterByDate(state.purchases); }
+
+function filterByDate(list) {
   const today = new Date(); today.setHours(0,0,0,0);
-  return state.sales.filter(s => {
-    const sd = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp);
+  return list.filter(s => {
+    const sd = recordDate(s);
     sd.setHours(0,0,0,0);
     switch (state.dateFilter) {
       case 'today':  return sd.getTime() === today.getTime();
@@ -688,10 +1183,19 @@ function saleTotal(s) {
 
 function saleProfit(s) {
   return (s.items ?? []).reduce((sum, it) => {
-    const product = state.products.find(p => p.id === it.productId);
-    const cost    = product?.costPrice ?? 0;
+    const product   = state.products.find(p => p.id === it.productId);
+    const cost      = product?.costPrice ?? 0;
     return sum + (it.priceAtSale - cost) * it.quantity;
   }, 0);
+}
+
+function purchaseTotal(p) {
+  if (typeof p.total === 'number') return p.total;
+  return (p.items ?? []).reduce((sum, it) => sum + (it.unitCost ?? 0) * it.quantity, 0);
+}
+
+function purchaseUnits(p) {
+  return (p.items ?? []).reduce((sum, it) => sum + (it.quantity ?? 0), 0);
 }
 
 function calculateSaleStats(sales) {
@@ -727,12 +1231,15 @@ function updateCustomDate() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function renderDashboard() {
-  const container     = document.getElementById('dashboard-page');
-  const lowStock      = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD);
+  const container  = document.getElementById('dashboard-page');
+  const lowStock   = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD);
   const filteredSales = getFilteredSales();
-  const stats         = calculateSaleStats(filteredSales);
-  const allTimeRev    = state.sales.reduce((s, x) => s + saleTotal(x), 0);
-  const recent        = state.sales.slice(0, 5);
+  const stats      = calculateSaleStats(filteredSales);
+  const filteredPurchases = getFilteredPurchases();
+  const purchaseSpend = filteredPurchases.reduce((s, x) => s + purchaseTotal(x), 0);
+  const purchaseUnitsIn = filteredPurchases.reduce((s, x) => s + purchaseUnits(x), 0);
+  const allTimeRev = state.sales.reduce((s, x) => s + saleTotal(x), 0);
+  const recent     = state.sales.slice(0, 5); // already sorted newest first by listener
 
   container.innerHTML = `
     <div class="page-header">
@@ -763,10 +1270,11 @@ function renderDashboard() {
           <button onclick="updateCustomDate()" class="btn btn-amber" style="width:100%;padding:10px 16px;font-size:13px;justify-content:center;">Apply Filter</button>
         </div>` : ''}
 
-      <div class="sales-analytics-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">
+      <div class="sales-analytics-grid">
         ${analyticsCard('💰 Total Revenue', fmt(stats.totalRevenue), `${stats.invoiceCount} transaction${stats.invoiceCount!==1?'s':''}`, 'var(--green)', 'rgba(22,163,74,0.08)', 'rgba(22,163,74,0.15)')}
         ${analyticsCard('🧾 Invoices Created', stats.invoiceCount, state.dateFilter==='today'?'Today':state.dateFilter==='month'?'This month':state.dateFilter==='year'?'This year':'Selected period', '#3b82f6', 'rgba(59,130,246,0.08)', 'rgba(59,130,246,0.15)')}
         ${analyticsCard('📈 Total Profit', fmt(stats.totalProfit), stats.totalRevenue>0?`${((stats.totalProfit/stats.totalRevenue)*100).toFixed(1)}% margin`:'No sales', 'var(--amber)', 'rgba(217,119,6,0.08)', 'rgba(217,119,6,0.15)')}
+        ${analyticsCard('🛒 Total Purchases', fmt(purchaseSpend), filteredPurchases.length ? `${filteredPurchases.length} purchase${filteredPurchases.length!==1?'s':''} · +${purchaseUnitsIn} units to stock` : 'No purchases', '#7c3aed', 'rgba(124,58,237,0.08)', 'rgba(124,58,237,0.15)')}
       </div>
     </div>
 
@@ -831,10 +1339,6 @@ function renderRecentSaleCard(s) {
   const payBg    = {cash:'rgba(22,163,74,0.10)',card:'rgba(59,130,246,0.10)',credit:'rgba(168,85,247,0.10)'};
   const payIcon  = {cash:'💵',card:'💳',credit:'🏦'};
 
-  const ts   = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp);
-  const diff = Date.now() - ts;
-  const m=Math.floor(diff/60000), h=Math.floor(diff/3600000), d=Math.floor(diff/86400000);
-  const ago  = m<1?'just now':m<60?`${m}m ago`:h<24?`${h}h ago`:`${d}d ago`;
 
   return `
     <div style="margin:8px 16px;padding:16px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;transition:all 0.2s ease;"
@@ -844,11 +1348,11 @@ function renderRecentSaleCard(s) {
         <div style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;">
           <div style="width:40px;height:40px;border-radius:10px;background:${payBg[pt]};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">${payIcon[pt]}</div>
           <div><div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:2px;">${s.customerName||'Unknown'}</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);">${s.customerPhone}</div></div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--text3);">📅 ${fmtDate(recordDate(s))}</div></div>
         </div>
         <div style="text-align:right;flex-shrink:0;">
           <div style="font-family:var(--mono);font-size:18px;font-weight:800;color:var(--green);margin-bottom:2px;">${fmt(tot)}</div>
-          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);background:var(--bg3);border-radius:4px;padding:2px 6px;display:inline-block;">🕐 ${ago}</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);background:var(--bg3);border-radius:4px;padding:2px 6px;display:inline-block;">${(s.items ?? []).length} item${(s.items ?? []).length!==1?'s':''}</div>
         </div>
       </div>
       <div style="height:1px;background:var(--border);margin:12px 0;"></div>
@@ -867,7 +1371,7 @@ function renderRecentSaleCard(s) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INVENTORY RENDERING
+// INVENTORY RENDERING (search-safe — only tbody re-renders on input)
 // ══════════════════════════════════════════════════════════════════════════════
 
 function renderInventory() {
@@ -913,7 +1417,7 @@ function renderInventoryTable() {
         <td><span class="badge badge-${status}">${statusText}</span></td>
         <td>
           <div style="display:flex;gap:6px;">
-            <button class="btn btn-ghost btn-sm" onclick='showModal(productFormHTML(${JSON.stringify(p)})); return false;'>✎ Edit</button>
+            <button class="btn btn-stock btn-sm" onclick="openPurchaseForm('${p.id}'); return false;" title="Record a purchase for this product">＋ Stock</button>
             <button class="btn btn-danger btn-sm" onclick="confirmDeleteProduct('${p.id}','${p.name.replace(/'/g,"\\'")}'); return false;">✕ Delete</button>
           </div>
         </td>
@@ -938,8 +1442,8 @@ function confirmDeleteProduct(id, name) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function renderSales() {
-  const container = document.getElementById('sales-page');
-  const totalRev  = state.sales.reduce((s, x) => s + saleTotal(x), 0);
+  const container  = document.getElementById('sales-page');
+  const totalRev   = state.sales.reduce((s, x) => s + saleTotal(x), 0);
 
   container.innerHTML = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:16px;">
@@ -951,7 +1455,7 @@ function renderSales() {
     </div>
     <div style="position:relative;margin-bottom:24px;">
       <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:15px;pointer-events:none;">🔍</span>
-      <input type="text" id="sales-search" placeholder="Search by customer, phone or product…" oninput="renderSalesList()"
+      <input type="text" id="sales-search" placeholder="Search by customer, date or product…" oninput="renderSalesList()"
         style="padding:11px 14px 11px 42px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);width:100%;outline:none;">
     </div>
     <div id="sales-list-container"></div>`;
@@ -960,14 +1464,15 @@ function renderSales() {
 }
 
 function renderSalesList() {
-  const container = document.getElementById('sales-list-container');
+  const container  = document.getElementById('sales-list-container');
   if (!container) return;
 
-  const term     = document.getElementById('sales-search')?.value.toLowerCase() || '';
+  const term = document.getElementById('sales-search')?.value.toLowerCase() || '';
   const filtered = state.sales.filter(s => {
     const items = s.items ?? [];
     return (s.customerName??'').toLowerCase().includes(term) ||
            (s.customerPhone??'').includes(term) ||
+           fmtDate(recordDate(s)).toLowerCase().includes(term) ||
            items.some(it => (it.productName??'').toLowerCase().includes(term));
   });
 
@@ -985,18 +1490,18 @@ function renderSalesList() {
 }
 
 function renderSaleCard(s) {
-  const items  = s.items ?? [];
-  const total  = saleTotal(s);
-  const isOpen = state.expandedSales[s.id];
-  const pt     = s.paymentType ?? 'cash';
-  const idx    = state.sales.findIndex(x => x.id === s.id);
-  const txnNum = String(state.sales.length - idx).padStart(4, '0');
+  const items    = s.items ?? [];
+  const total    = saleTotal(s);
+  const isOpen   = state.expandedSales[s.id];
+  const pt       = s.paymentType ?? 'cash';
+  const idx      = state.sales.findIndex(x => x.id === s.id);
+  const txnNum   = String(state.sales.length - idx).padStart(4, '0');
 
   const payColor = {cash:'#16a34a',card:'#3b82f6',credit:'#a855f7'};
   const payBg    = {cash:'rgba(22,163,74,0.08)',card:'rgba(59,130,246,0.08)',credit:'rgba(168,85,247,0.08)'};
   const payIcon  = {cash:'💵',card:'💳',credit:'🏦'};
 
-  const ts = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp);
+  const ts = toDate(s.timestamp);
 
   return `
     <div class="txn-card" style="box-shadow:${isOpen?'0 4px 20px rgba(0,0,0,0.06)':'none'};">
@@ -1005,7 +1510,7 @@ function renderSaleCard(s) {
         <div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span style="font-weight:600;font-size:14px;color:var(--text);">${s.customerName||'Unknown'}</span>
-            <span style="font-family:var(--mono);font-size:11px;color:var(--text3);">${s.customerPhone}</span>
+            <span style="font-family:var(--mono);font-size:11px;color:var(--text3);">📅 ${fmtDate(recordDate(s))}</span>
           </div>
           <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
             ${items.slice(0,3).map(it=>`<span style="font-family:var(--mono);font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--text2);">${it.productName} ×${it.quantity}</span>`).join('')}
@@ -1022,7 +1527,7 @@ function renderSaleCard(s) {
         <div style="border-top:1px solid var(--border);">
           <div style="background:var(--bg3);padding:8px 20px;display:flex;align-items:center;gap:8px;">
             <span style="font-size:13px;">🕐</span>
-            <span style="font-family:var(--mono);font-size:12px;color:var(--text3);">${ts.toLocaleString('en-US',{weekday:'short',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+            <span style="font-family:var(--mono);font-size:12px;color:var(--text3);">${s.saleDate ? `Sale date ${fmtDate(recordDate(s))} · recorded ` : ''}${ts.toLocaleString('en-US',{weekday:'short',year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>
             <span style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);">TXN-${s.id.toUpperCase()}</span>
           </div>
           <div style="padding:16px 20px;">
@@ -1055,4 +1560,144 @@ function renderSaleCard(s) {
 function toggleSaleExpand(id) {
   state.expandedSales[id] = !state.expandedSales[id];
   renderSalesList();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PURCHASES RENDERING
+// ══════════════════════════════════════════════════════════════════════════════
+
+function renderPurchases() {
+  const container = document.getElementById('purchases-page');
+  if (!container) return;
+  const totalSpent = state.purchases.reduce((s, x) => s + purchaseTotal(x), 0);
+  const subText    = `PURCHASE_HISTORY // ${state.purchases.length} purchase${state.purchases.length !== 1 ? 's' : ''} · ${fmt(totalSpent)} total spent`;
+
+  // Page shell already built → only refresh header + list (keeps search box focus while typing)
+  const existingSub = document.getElementById('purchases-sub');
+  if (existingSub) {
+    existingSub.textContent = subText;
+    renderPurchasesList();
+    return;
+  }
+
+  container.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:16px;">
+      <div>
+        <div class="page-title">Purchases</div>
+        <div class="page-sub" id="purchases-sub">${subText}</div>
+      </div>
+      <button class="btn btn-amber" style="padding:10px 20px;font-size:14px;" onclick="openPurchaseForm(); return false;">🛒 New Purchase</button>
+    </div>
+    <div style="position:relative;margin-bottom:24px;">
+      <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:15px;pointer-events:none;">🔍</span>
+      <input type="text" id="purchases-search" placeholder="Search by supplier, invoice no. or product…" oninput="renderPurchasesList()"
+        style="padding:11px 14px 11px 42px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);width:100%;outline:none;">
+    </div>
+    <div id="purchases-list-container"></div>`;
+
+  renderPurchasesList();
+}
+
+function renderPurchasesList() {
+  const container = document.getElementById('purchases-list-container');
+  if (!container) return;
+
+  const term = (document.getElementById('purchases-search')?.value || '').toLowerCase();
+  const filtered = state.purchases.filter(p =>
+    (p.supplierName ?? '').toLowerCase().includes(term) ||
+    (p.supplierPhone ?? '').includes(term) ||
+    (p.invoiceNo ?? '').toLowerCase().includes(term) ||
+    (p.items ?? []).some(it => (it.productName ?? '').toLowerCase().includes(term)));
+
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div style="text-align:center;padding:64px 24px;color:var(--text3);">
+        <div style="font-size:48px;margin-bottom:16px;">🛒</div>
+        <div style="font-size:16px;font-weight:600;color:var(--text2);margin-bottom:8px;">${state.purchases.length === 0 ? 'No purchases yet' : 'No results found'}</div>
+        <div style="font-size:13px;">${state.purchases.length === 0 ? 'Record a purchase and its items are added to stock automatically' : 'Try adjusting your search'}</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = `<div style="display:flex;flex-direction:column;gap:12px;">${filtered.map(renderPurchaseCard).join('')}</div>`;
+}
+
+function renderPurchaseCard(p) {
+  const items  = p.items ?? [];
+  const total  = purchaseTotal(p);
+  const units  = purchaseUnits(p);
+  const isOpen = state.expandedPurchases[p.id];
+  const pt     = PAY_COLOR[p.paymentType] ? p.paymentType : 'cash';
+  const idx    = state.purchases.findIndex(x => x.id === p.id);
+  const num    = String(state.purchases.length - idx).padStart(4, '0');
+  const ts     = toDate(p.timestamp);
+  const subtotal  = typeof p.subtotal  === 'number' ? p.subtotal  : items.reduce((s, it) => s + (it.unitCost ?? 0) * it.quantity, 0);
+  const vatAmount = typeof p.vatAmount === 'number' ? p.vatAmount : 0;
+
+  return `
+    <div class="txn-card" style="box-shadow:${isOpen ? '0 4px 20px rgba(0,0,0,0.06)' : 'none'};">
+      <div class="txn-card-header" onclick="togglePurchaseExpand('${p.id}')">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 8px;white-space:nowrap;">PO-${num}</div>
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="font-weight:600;font-size:14px;color:var(--text);">🏭 ${esc(p.supplierName || 'Unknown supplier')}</span>
+            ${p.supplierPhone ? `<span style="font-family:var(--mono);font-size:11px;color:var(--text3);">${esc(p.supplierPhone)}</span>` : ''}
+            ${p.invoiceNo ? `<span style="font-family:var(--mono);font-size:10px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;">${esc(p.invoiceNo)}</span>` : ''}
+          </div>
+          <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
+            ${items.slice(0, 3).map(it => `<span style="font-family:var(--mono);font-size:11px;background:var(--green-dim);border:1px solid rgba(22,163,74,0.2);border-radius:4px;padding:2px 7px;color:var(--green);">${esc(it.productName)} +${it.quantity}</span>`).join('')}
+            ${items.length > 3 ? `<span style="font-family:var(--mono);font-size:11px;color:var(--text3);padding:2px 4px;">+${items.length - 3} more</span>` : ''}
+          </div>
+        </div>
+        <span style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:7px;font-size:12px;font-weight:600;font-family:var(--mono);background:${PAY_BG[pt]};color:${PAY_COLOR[pt]};white-space:nowrap;">
+          ${PAY_ICON[pt]} ${pt.charAt(0).toUpperCase() + pt.slice(1)}
+        </span>
+        <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--purple);white-space:nowrap;">${fmt(total)}</div>
+        <div style="font-size:12px;color:var(--text3);transition:transform 0.2s;transform:rotate(${isOpen ? '180' : '0'}deg);">▾</div>
+      </div>
+      ${isOpen ? `
+        <div style="border-top:1px solid var(--border);">
+          <div style="background:var(--bg3);padding:8px 20px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:13px;">🕐</span>
+            <span style="font-family:var(--mono);font-size:12px;color:var(--text3);">${ts.toLocaleString('en-US', { weekday:'short', year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}</span>
+            <span style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);">by ${esc(p.recordedBy || 'unknown')}</span>
+          </div>
+          <div style="padding:16px 20px;">
+            <div class="section-label" style="margin-bottom:10px;">Items Added to Stock</div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              ${items.map(it => `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+                  <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                    <div style="width:32px;height:32px;flex-shrink:0;border-radius:8px;background:var(--green-dim);border:1px solid rgba(22,163,74,0.25);display:flex;align-items:center;justify-content:center;font-size:14px;">📥</div>
+                    <div style="min-width:0;">
+                      <div style="font-weight:600;font-size:13px;color:var(--text);">
+                        ${esc(it.productName)}
+                        ${it.isNewProduct ? `<span style="font-family:var(--mono);font-size:9px;letter-spacing:1px;background:var(--amber-glow);color:var(--amber);border:1px solid var(--amber-dim);border-radius:4px;padding:1px 5px;margin-left:4px;">NEW</span>` : ''}
+                      </div>
+                      <div style="font-family:var(--mono);font-size:11px;color:var(--text3);"><span style="color:var(--green);font-weight:600;">+${it.quantity}</span> unit${it.quantity !== 1 ? 's' : ''} × ${fmt(it.unitCost ?? 0)}</div>
+                    </div>
+                  </div>
+                  <div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;">${fmt((it.unitCost ?? 0) * it.quantity)}</div>
+                </div>`).join('')}
+            </div>
+            <div style="margin-top:12px;padding:12px 14px;background:rgba(124,58,237,0.05);border:1px solid rgba(124,58,237,0.2);border-radius:8px;">
+              ${vatAmount > 0 ? `
+                <div class="summary-line"><span>Subtotal</span><strong>${fmt(subtotal)}</strong></div>
+                <div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <div class="section-label" style="margin:0;">Total Cost</div>
+                  <div style="font-size:12px;color:var(--text3);margin-top:2px;">${units} unit${units !== 1 ? 's' : ''} added · paid by ${pt}${p.vatIncluded === false ? '' : ' · VAT incl.'}</div>
+                </div>
+                <div style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--purple);">${fmt(total)}</div>
+              </div>
+            </div>
+          </div>
+        </div>` : ''}
+    </div>`;
+}
+
+function togglePurchaseExpand(id) {
+  state.expandedPurchases[id] = !state.expandedPurchases[id];
+  renderPurchasesList();
 }

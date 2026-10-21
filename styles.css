@@ -94,7 +94,9 @@
   color-scheme: dark;
 }
 
-html { -webkit-text-size-adjust: 100%; background: var(--bg); }
+/* Always keep room for the scrollbar so the layout doesn't jump sideways
+   when a page is short (no scrollbar) vs long (scrollbar) on desktop browsers */
+html { -webkit-text-size-adjust: 100%; background: var(--bg); scrollbar-gutter: stable; }
 body {
   background: var(--bg); color: var(--text); font-family: var(--font);
   font-size: 14px; line-height: 1.4; min-height: 100vh;

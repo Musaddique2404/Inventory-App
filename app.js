@@ -664,30 +664,62 @@ function renderCurrentPage() {
 // FORM BUILDERS
 // ══════════════════════════════════════════════════════════════════════════════
 
+// A product's stock per branch, also for products saved before branches existed
+function stockMap(p) {
+  if (p && p.stock && typeof p.stock === 'object') return { ...p.stock };
+  return { [MAIN_BRANCH]: Number(p?.quantity) || 0 };
+}
+
+// Stock fields for the edit form: one "Quantity" box with a single branch,
+// one box per branch when stock is split across branches
+function stockFieldsHTML(product) {
+  const branches = state.branches.length ? state.branches : [branchById(MAIN_BRANCH)];
+  const stock = stockMap(product);
+  const input = (b, label) => `
+    <div class="field">
+      <label>${label}</label>
+      <input type="number" name="stock_${b.id}" data-branch="${b.id}" value="${Number(stock[b.id]) || 0}" min="0" step="1" placeholder="0" inputmode="numeric" required>
+    </div>`;
+  if (branches.length === 1) return input(branches[0], 'Quantity <span class="req">*</span>');
+  return `
+    <div class="field">
+      <label>Stock by branch <span class="hint">· total updates automatically</span></label>
+      <div class="form-row stock-grid">${branches.map(b => input(b, esc(b.name))).join('')}</div>
+    </div>`;
+}
+
+function openEditProduct(id) {
+  const p = state.products.find(x => x.id === id);
+  if (!p) { showToast('Product not found', 'error'); return; }
+  showModal(productFormHTML(p));
+}
+
 function productFormHTML(product = null) {
   const isEdit = product !== null;
+  const prices = `
+        <div class="form-row">
+          <div class="field">
+            <label>Buying price</label>
+            <input type="number" name="costPrice" value="${product?.costPrice ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+          </div>
+          <div class="field">
+            <label>Selling price</label>
+            <input type="number" name="price" value="${product?.price ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
+          </div>
+        </div>`;
   return `
-    <div class="modal-title"><span class="ic ic-orange">${ic('box')}</span>${isEdit ? 'Edit product' : 'Add product'}</div>
+    <div class="modal-title"><span class="ic ic-orange">${ic(isEdit ? 'edit' : 'box')}</span>${isEdit ? 'Edit product' : 'Add product'}</div>
     <form id="product-form" onsubmit="return handleProductSubmit(event, ${isEdit ? `'${product.id}'` : 'null'})">
       <div class="form-grid">
         <div class="field">
           <label>Product name <span class="req">*</span></label>
           <input type="text" name="name" value="${esc(product?.name || '')}" placeholder="e.g. Apple AirPods" required>
         </div>
-        <div class="form-row">
-          <div class="field">
-            <label>Quantity <span class="req">*</span></label>
-            <input type="number" name="quantity" value="${product?.quantity ?? ''}" min="0" placeholder="0" inputmode="numeric" required>
-          </div>
-          <div class="field">
-            <label>Buying price</label>
-            <input type="number" name="costPrice" value="${product?.costPrice ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
-          </div>
-        </div>
+        ${isEdit ? prices + stockFieldsHTML(product) : `
         <div class="field">
-          <label>Selling price</label>
-          <input type="number" name="price" value="${product?.price ?? ''}" min="0" step="0.01" placeholder="0.00" inputmode="decimal">
-        </div>
+          <label>Quantity <span class="req">*</span></label>
+          <input type="number" name="quantity" value="" min="0" placeholder="0" inputmode="numeric" required>
+        </div>` + prices}
         <div class="form-actions">
           <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
           <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Add product'}</button>
@@ -699,13 +731,29 @@ function productFormHTML(product = null) {
 function handleProductSubmit(event, productId) {
   event.preventDefault();
   const form = event.target;
+  const get  = n => form.elements[n].value;
   const data = {
-    name:      form.name.value.trim(),
-    quantity:  parseInt(form.quantity.value),
-    costPrice: form.costPrice.value ? parseFloat(form.costPrice.value) : null,
-    price:     form.price.value     ? parseFloat(form.price.value)     : null,
+    name:      get('name').trim(),
+    costPrice: get('costPrice') ? parseFloat(get('costPrice')) : null,
+    price:     get('price')     ? parseFloat(get('price'))     : null,
   };
-  productId ? editProduct(productId, data) : addProduct(data);
+  if (!data.name) { showToast('Product name is required', 'error'); return false; }
+
+  if (productId) {
+    const p = state.products.find(x => x.id === productId);
+    if (!p) { closeModal(); showToast('Product not found', 'error'); return false; }
+    // Keep the per-branch stock and the overall total in step
+    const stock = stockMap(p);
+    form.querySelectorAll('[data-branch]').forEach(inp => {
+      stock[inp.dataset.branch] = Math.max(0, parseInt(inp.value, 10) || 0);
+    });
+    data.stock    = stock;
+    data.quantity = Object.values(stock).reduce((s, v) => s + (Number(v) || 0), 0);
+    editProduct(productId, data);
+  } else {
+    data.quantity = parseInt(get('quantity'), 10) || 0;
+    addProduct(data);
+  }
   return false;
 }
 
@@ -983,6 +1031,7 @@ function renderInventoryTable() {
           <div class="prod-qty"><b>${p.quantity}</b><span class="tag ${status}">${statusText}</span></div>
         </div>
         <div class="prod-actions">
+          <button class="btn btn-soft btn-sm" onclick="openEditProduct('${p.id}'); return false;" title="Edit name, prices and quantity">${ic('edit', 14)}Edit</button>
           <button class="btn btn-stock btn-sm" onclick="openPurchaseForm('${p.id}'); return false;" title="Record a purchase for this product">${ic('plus', 14, 2.4)}Stock</button>
           <button class="btn btn-danger btn-sm" onclick="confirmDeleteProduct('${p.id}'); return false;">${ic('trash', 14)}Delete</button>
         </div>

@@ -271,7 +271,9 @@ svg { display: block; flex-shrink: 0; }
 .prod-top { display: flex; align-items: center; gap: 12px; }
 .prod-qty { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex-shrink: 0; }
 .prod-qty b { font-size: 22px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
-.prod-actions { display: flex; gap: 8px; padding-left: 48px; }
+.prod-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 48px; }
+.stock-grid { row-gap: 12px; }
+.stock-grid label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prod .sr-sub { white-space: normal; }
 
 /* ══════════════════════ BUTTONS ══════════════════════ */

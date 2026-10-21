@@ -71,6 +71,13 @@ let state = {
   salesToast: '',
   histLimit: 15,
   saleSubmitting: false,
+  // Purchases page (From vendor / Quick buy)
+  purchaseMode: 'po',
+  pdraft: null,
+  qdraft: null,
+  purchasesToast: '',
+  purchaseHistLimit: 15,
+  purchaseSubmitting: false,
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -102,8 +109,9 @@ function todayISO() {
 
 // The date a sale/purchase belongs to: the chosen sale date, else when it was recorded
 function recordDate(r) {
-  if (r.saleDate) {
-    const [y, m, d] = r.saleDate.split('-').map(Number);
+  const iso = r.saleDate || r.purchaseDate;
+  if (iso) {
+    const [y, m, d] = iso.split('-').map(Number);
     return new Date(y, m - 1, d);
   }
   return toDate(r.timestamp);
@@ -161,6 +169,10 @@ const ICONS = {
   refund:    'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
   arrowR:    'M5 12h14M13 6l6 6-6 6',
   close:     'M7 7l10 10M17 7L7 17',
+  truck:     'M3 7h11v10H3zM14 10h4l3 3v4h-7M7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  bag:       'M6 8h12l-1 12H7zM9 8V6a3 3 0 0 1 6 0v2',
+  camera:    'M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
+  note:      'M6 3h9l4 4v14H6zM14 3v5h5M9 12h6M9 16h6',
 };
 
 function ic(name, size = 16, stroke = 2) {
@@ -427,6 +439,8 @@ function stopFirestoreListeners() {
   state.branches  = [];
   state.transfers = [];
   state.draft     = null;
+  state.pdraft    = null;
+  state.qdraft    = null;
   state.sheet     = null;
   _migrated.clear();
 }
@@ -514,18 +528,19 @@ async function recordSale(data) {
 // Every purchase ADDS its quantities to stock in the same atomic batch.
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function recordPurchase(data, { updateCostPrice = true } = {}) {
-  const batch = db.batch();
-  const now   = firebase.firestore.FieldValue.serverTimestamp();
+async function recordPurchase(data) {
+  const batch  = db.batch();
+  const now    = firebase.firestore.FieldValue.serverTimestamp();
+  const branch = data.branchId || MAIN_BRANCH;
 
-  const items = data.items.map(item => {
-    // Brand-new product bought for the first time → create it with the purchased qty
+  // Items going into stock (vendor purchases, or quick buys marked "Add to inventory")
+  const items = (data.items || []).map(item => {
     if (item.isNew) {
       const productRef = userProductsCol().doc();
       batch.set(productRef, {
         name:      item.productName,
         quantity:  item.quantity,
-        stock:     { [MAIN_BRANCH]: item.quantity },
+        stock:     { [branch]: item.quantity },
         costPrice: item.unitCost,
         price:     item.sellingPrice ?? null,
         createdAt: now,
@@ -533,45 +548,32 @@ async function recordPurchase(data, { updateCostPrice = true } = {}) {
       });
       return { productId: productRef.id, productName: item.productName, quantity: item.quantity, unitCost: item.unitCost, isNewProduct: true };
     }
-
-    // Existing product → increment stock (and optionally refresh its buying price)
-    const productRef = userProductsCol().doc(item.productId);
-    const update = {
+    batch.update(userProductsCol().doc(item.productId), {
       quantity:  firebase.firestore.FieldValue.increment(item.quantity),
-      [`stock.${MAIN_BRANCH}`]: firebase.firestore.FieldValue.increment(item.quantity),
+      [`stock.${branch}`]: firebase.firestore.FieldValue.increment(item.quantity),
+      costPrice: item.unitCost,                       // latest buying price
       updatedAt: now,
-    };
-    if (updateCostPrice) update.costPrice = item.unitCost;
-    batch.update(productRef, update);
+    });
     return { productId: item.productId, productName: item.productName, quantity: item.quantity, unitCost: item.unitCost };
   });
 
   const purchaseRef = userPurchasesCol().doc();
-  batch.set(purchaseRef, {
-    supplierName:  data.supplierName,
-    supplierPhone: data.supplierPhone,
-    invoiceNo:     data.invoiceNo,
-    branchId:      MAIN_BRANCH,
-    paymentType:   data.paymentType,
-    vatIncluded:   data.vatIncluded,
-    subtotal:      data.subtotal,
-    vatAmount:     data.vatAmount,
-    total:         data.total,
-    items,
-    recordedBy: state.currentUser?.email || 'unknown',
-    timestamp:  now,
-  });
+  const doc = { ...data, items, branchId: branch, recordedBy: state.currentUser?.email || 'unknown', timestamp: now };
+  delete doc.receiptImage;
+  batch.set(purchaseRef, doc);
+  await batch.commit();
 
-  try {
-    await batch.commit();
-    closeModal();
-    const units = items.reduce((s, it) => s + it.quantity, 0);
-    showToast(`Purchase recorded — ${units} unit${units !== 1 ? 's' : ''} added to stock`);
-  } catch (e) {
-    console.error(e);
-    showToast('Failed to record purchase', 'error');
-    setPurchaseSubmitting(false);
+  // Receipt photos live in their own collection so lists stay light
+  if (data.receiptImage) {
+    try {
+      await userCol('receipts').doc(purchaseRef.id).set({ image: data.receiptImage, createdAt: now });
+      await purchaseRef.update({ hasReceipt: true });
+    } catch (e) {
+      console.error('Receipt upload failed:', e);
+      showToast('Purchase saved, but the receipt photo could not be saved', 'error');
+    }
   }
+  return purchaseRef.id;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -595,9 +597,22 @@ function showToast(message, type = 'success') {
 function showModal(content) {
   document.getElementById('modal-container').innerHTML = `
     <div class="overlay" onclick="if(event.target===this) closeModal()">
-      <div class="modal">${content}</div>
+      <div class="modal" role="dialog" aria-modal="true">
+        <button class="modal-close" onclick="closeModal()" aria-label="Close">${ic('close', 14, 2.2)}</button>
+        ${content}
+      </div>
     </div>`;
+  const first = document.querySelector('.modal input, .modal button:not(.modal-close)');
+  if (first) first.focus();
 }
+
+// Escape closes whatever is open (picker sheet first, then pop-up)
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (state.sheet) { closeSheet(); return; }
+  const mc = document.getElementById('modal-container');
+  if (mc && mc.innerHTML.trim()) closeModal();
+});
 
 function closeModal() {
   document.getElementById('modal-container').innerHTML = '';
@@ -628,11 +643,8 @@ function renderCurrentPage() {
     case 'sales':     renderSales();      break;
     case 'purchases': renderPurchases();  break;
   }
-  // Keep an open purchase form in sync when products change in real time
-  // (skipped while the user is typing in it, so no keystrokes are lost)
+  // Keep an open picker list in sync when data changes in real time
   if (state.sheet && document.getElementById('sheet-list')) renderSheetList();
-  const pc = document.getElementById('purchase-items-container');
-  if (pc && !pc.contains(document.activeElement)) renderPurchaseItems();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -693,352 +705,6 @@ function handleProductSubmit(event, productId) {
 
 
 
-
-// ══════════════════════════════════════════════════════════════════════════════
-// PURCHASE FORM
-// ══════════════════════════════════════════════════════════════════════════════
-
-const NEW_PRODUCT = '__new__';
-const VAT_RATE    = 0.15;
-
-let purchaseFormState = { items: [], paymentType: 'cash', vatIncluded: true, updateCostPrice: true, errors: {}, submitting: false };
-
-function openPurchaseForm(productId = '') {
-  showModal(purchaseFormHTML());
-  initPurchaseForm(productId);
-}
-
-function purchaseFormHTML() {
-  const suppliers = [...new Set(state.purchases.map(p => p.supplierName).filter(Boolean))];
-  return `
-    <div class="modal-title"><span class="ic ic-purple">${ic('cart')}</span>New purchase</div>
-    <div class="purchase-form">
-      <div class="purchase-note">Every item in this purchase is <strong>added to stock</strong> as soon as you save it.</div>
-
-      <div class="form-section">
-        <div class="form-label"><span class="lbl">Supplier</span></div>
-        <div class="supplier-grid">
-          <div class="field supplier-name-field">
-            <label>Supplier name <span class="req">*</span></label>
-            <input type="text" id="supplier-name" list="supplier-list" placeholder="e.g. Al-Jazeera Trading" autocomplete="off">
-            <datalist id="supplier-list">${suppliers.map(s => `<option value="${esc(s)}">`).join('')}</datalist>
-            <span class="err-msg" id="err-supplier-name"></span>
-          </div>
-          <div class="field">
-            <label>Phone <span class="hint">(optional)</span></label>
-            <input type="tel" id="supplier-phone" placeholder="+966 5XX XXX XXXX">
-            <span class="err-msg" id="err-supplier-phone"></span>
-          </div>
-          <div class="field">
-            <label>Invoice no. <span class="hint">(optional)</span></label>
-            <input type="text" id="supplier-invoice" placeholder="INV-1001">
-          </div>
-        </div>
-      </div>
-
-      <div class="form-divider"></div>
-
-      <div class="form-section">
-        <div class="form-label">
-          <span class="lbl">Items (<span id="purchase-item-count">1</span>)</span>
-          <button type="button" class="add-item-btn" onclick="addPurchaseItem()">+ Add item</button>
-        </div>
-        <div class="purchase-row purchase-row-head"><span>Product</span><span>Qty</span><span>Cost / unit</span><span></span></div>
-        <div id="purchase-items-container"></div>
-      </div>
-
-      <div class="form-divider"></div>
-
-      <div class="form-section">
-        <div class="form-label"><span class="lbl">Payment &amp; options</span></div>
-        <label class="option-check">
-          <input type="checkbox" id="purchase-vat-included" checked>
-          <div style="flex:1;">
-            <div class="option-check-title">VAT included in cost</div>
-            <div class="option-check-desc" id="purchase-vat-description">Costs already include 15% VAT</div>
-          </div>
-        </label>
-        <label class="option-check">
-          <input type="checkbox" id="purchase-update-cost" checked>
-          <div style="flex:1;">
-            <div class="option-check-title">Update buying price</div>
-            <div class="option-check-desc">Set each product's buying price to this unit cost</div>
-          </div>
-        </label>
-        <div id="purchase-payment-types" class="pay-types"></div>
-      </div>
-
-      <div id="purchase-summary"></div>
-      <div class="form-actions">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" id="btn-submit-purchase" onclick="submitPurchase()">Record purchase</button>
-      </div>
-    </div>`;
-}
-
-function newPurchaseItem(productId = '') {
-  const product = state.products.find(p => p.id === productId);
-  return {
-    id: uid(),
-    productId: product ? product.id : '',
-    isNew: false,
-    newName: '',
-    sellingPrice: '',
-    qty: '',
-    cost: product?.costPrice != null ? String(product.costPrice) : '',
-  };
-}
-
-function initPurchaseForm(productId = '') {
-  purchaseFormState = {
-    items: [newPurchaseItem(productId)],
-    paymentType: 'cash',
-    vatIncluded: true,
-    updateCostPrice: true,
-    errors: {},
-    submitting: false,
-  };
-  renderPurchaseItems();
-  renderPurchasePaymentTypes();
-  updatePurchaseSummary();
-
-  document.getElementById('purchase-vat-included')?.addEventListener('change', e => {
-    purchaseFormState.vatIncluded = e.target.checked;
-    const desc = document.getElementById('purchase-vat-description');
-    if (desc) desc.textContent = purchaseFormState.vatIncluded
-      ? 'Costs already include 15% VAT'
-      : '15% VAT will be added to total';
-    updatePurchaseSummary();
-  });
-  document.getElementById('purchase-update-cost')?.addEventListener('change', e => {
-    purchaseFormState.updateCostPrice = e.target.checked;
-  });
-}
-
-function addPurchaseItem() {
-  purchaseFormState.items.push(newPurchaseItem());
-  renderPurchaseItems();
-  updatePurchaseSummary();
-}
-
-function removePurchaseItem(itemId) {
-  if (purchaseFormState.items.length > 1) {
-    purchaseFormState.items = purchaseFormState.items.filter(it => it.id !== itemId);
-    delete purchaseFormState.errors[itemId];
-    renderPurchaseItems();
-    updatePurchaseSummary();
-  }
-}
-
-function updatePurchaseItem(itemId, field, value) {
-  const item = purchaseFormState.items.find(it => it.id === itemId);
-  if (!item) return;
-
-  if (field === 'productId') {
-    if (value === NEW_PRODUCT) {
-      item.isNew = true;
-      item.productId = '';
-      item.cost = '';
-    } else {
-      const product = state.products.find(p => p.id === value);
-      item.isNew = false;
-      item.newName = '';
-      item.sellingPrice = '';
-      item.productId = value;
-      item.cost = product?.costPrice != null ? String(product.costPrice) : '';
-    }
-  } else {
-    item[field] = value;
-  }
-  delete purchaseFormState.errors[itemId];
-  renderPurchaseItems();
-  updatePurchaseSummary();
-}
-
-function renderPurchaseItems() {
-  const container = document.getElementById('purchase-items-container');
-  if (!container) return;
-
-  const usedIds = purchaseFormState.items.map(it => it.productId).filter(Boolean);
-  const single  = purchaseFormState.items.length === 1;
-
-  container.innerHTML = purchaseFormState.items.map(item => {
-    const product  = state.products.find(p => p.id === item.productId);
-    const qty      = Number(item.qty);
-    const cost     = Number(item.cost);
-    const validQty = item.qty !== '' && Number.isInteger(qty) && qty > 0;
-    const lineTotal = validQty && item.cost !== '' && !isNaN(cost) && cost >= 0 ? qty * cost : null;
-    const active   = item.isNew || !!item.productId;
-    const err      = purchaseFormState.errors[item.id];
-
-    const productCell = item.isNew ? `
-      <div class="new-product-input">
-        <input type="text" value="${esc(item.newName)}" placeholder="New product name"
-          onchange="updatePurchaseItem('${item.id}','newName',this.value)">
-        <button type="button" title="Pick an existing product instead"
-          onclick="updatePurchaseItem('${item.id}','productId','')">↺</button>
-      </div>` : `
-      <select onchange="updatePurchaseItem('${item.id}','productId',this.value)">
-        <option value="">— Select product —</option>
-        ${state.products.map(p => {
-          const taken = usedIds.includes(p.id) && p.id !== item.productId;
-          return `<option value="${p.id}" ${item.productId === p.id ? 'selected' : ''} ${taken ? 'disabled' : ''}>${esc(p.name)} (${p.quantity} in stock)</option>`;
-        }).join('')}
-        <option value="${NEW_PRODUCT}">➕ New product…</option>
-      </select>`;
-
-    let stockHint = '';
-    if (product) {
-      stockHint = validQty
-        ? `${product.quantity} in stock → <strong style="color:var(--green);">${product.quantity + qty}</strong> after purchase`
-        : `${product.quantity} in stock`;
-    } else if (item.isNew) {
-      stockHint = `New product — will be added to inventory${validQty ? ` with <strong style="color:var(--green);">${qty}</strong> in stock` : ''}`;
-    }
-
-    return `
-      <div class="purchase-item${err ? ' has-error' : ''}">
-        <div class="purchase-row">
-          <div class="purchase-product">${productCell}</div>
-          <input type="number" min="1" step="1" value="${esc(item.qty)}" placeholder="Qty"
-            onchange="updatePurchaseItem('${item.id}','qty',this.value)" ${active ? '' : 'disabled'}>
-          <div class="sar-input">
-            <span>SAR</span>
-            <input type="number" min="0" step="0.01" value="${esc(item.cost)}" placeholder="0.00"
-              onchange="updatePurchaseItem('${item.id}','cost',this.value)" ${active ? '' : 'disabled'}>
-          </div>
-          <button type="button" class="row-remove-btn" onclick="removePurchaseItem('${item.id}')" ${single ? 'disabled' : ''} aria-label="Remove item">${ic('x', 15)}</button>
-        </div>
-        ${item.isNew ? `
-          <div class="new-product-extra">
-            <label>Selling price (optional)</label>
-            <div class="sar-input">
-              <span>SAR</span>
-              <input type="number" min="0" step="0.01" value="${esc(item.sellingPrice)}" placeholder="0.00"
-                onchange="updatePurchaseItem('${item.id}','sellingPrice',this.value)">
-            </div>
-          </div>` : ''}
-        <div class="purchase-item-meta">
-          <span>${stockHint}</span>
-          ${lineTotal !== null ? `<span>${qty} × ${fmt(cost)} = <strong style="color:var(--orange);">${fmt(lineTotal)}</strong></span>` : ''}
-        </div>
-        ${err ? `<div class="err-msg" style="margin-top:4px;">${esc(err)}</div>` : ''}
-      </div>`;
-  }).join('');
-
-  const el = document.getElementById('purchase-item-count');
-  if (el) el.textContent = purchaseFormState.items.length;
-}
-
-function renderPurchasePaymentTypes() {
-  const container = document.getElementById('purchase-payment-types');
-  if (!container) return;
-  container.innerHTML = PAYMENT_TYPES.map(pt => `
-    <button type="button" class="pay-type-btn${purchaseFormState.paymentType === pt.id ? ' active' : ''}"
-      onclick="purchaseFormState.paymentType='${pt.id}'; renderPurchasePaymentTypes();">${ic(PAY_IC[pt.id], 20)}${pt.label}</button>`).join('');
-}
-
-function purchaseFormTotals() {
-  const subtotal = purchaseFormState.items.reduce((s, i) => {
-    const line = Number(i.qty) * Number(i.cost);
-    return s + (isNaN(line) ? 0 : line);
-  }, 0);
-  const vatAmount = purchaseFormState.vatIncluded ? 0 : subtotal * VAT_RATE;
-  const units = purchaseFormState.items.reduce((s, i) => s + (Number(i.qty) > 0 ? Number(i.qty) : 0), 0);
-  return { subtotal, vatAmount, total: subtotal + vatAmount, units };
-}
-
-function updatePurchaseSummary() {
-  const container = document.getElementById('purchase-summary');
-  if (!container) return;
-  const { subtotal, vatAmount, total, units } = purchaseFormTotals();
-  const n = purchaseFormState.items.length;
-
-  container.innerHTML = `
-    <div class="order-summary-box">
-      <div class="osb-label">Purchase summary</div>
-      <div class="summary-line"><span>Units added to stock</span><strong>+${units}</strong></div>
-      <div class="summary-line"><span>Subtotal (${n} item${n !== 1 ? 's' : ''})</span><strong>${fmt(subtotal)}</strong></div>
-      ${!purchaseFormState.vatIncluded ? `<div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div>` : ''}
-      <div class="summary-total"><span>Total cost</span><span class="summary-total-value">${fmt(total)}</span></div>
-    </div>`;
-}
-
-function setPurchaseSubmitting(on) {
-  purchaseFormState.submitting = on;
-  const btn = document.getElementById('btn-submit-purchase');
-  if (btn) {
-    btn.disabled = on;
-    btn.textContent = on ? 'Saving…' : 'Record purchase';
-  }
-}
-
-function submitPurchase() {
-  if (purchaseFormState.submitting) return;   // prevent double stock-in on double click
-
-  const supplierName  = document.getElementById('supplier-name').value.trim();
-  const supplierPhone = document.getElementById('supplier-phone').value.trim();
-  const invoiceNo     = document.getElementById('supplier-invoice').value.trim();
-  const errors = {};
-  const rowErrors = {};
-
-  if (!supplierName) errors.supplierName = 'Supplier name is required';
-  if (supplierPhone && !/^\+?[\d\s\-().]{7,15}$/.test(supplierPhone)) errors.supplierPhone = 'Enter a valid phone number';
-
-  const newNames = new Set();
-  purchaseFormState.items.forEach(item => {
-    const errs = [];
-    if (item.isNew) {
-      const name = item.newName.trim();
-      if (!name) errs.push('Enter the new product name');
-      else if (state.products.some(p => (p.name ?? '').trim().toLowerCase() === name.toLowerCase()))
-        errs.push(`"${name}" already exists — pick it from the list`);
-      else if (newNames.has(name.toLowerCase())) errs.push('Same new product added twice');
-      newNames.add(name.toLowerCase());
-      if (item.sellingPrice !== '' && (isNaN(item.sellingPrice) || Number(item.sellingPrice) < 0)) errs.push('Invalid selling price');
-    } else if (!item.productId) {
-      errs.push('Select a product');
-    } else if (!state.products.some(p => p.id === item.productId)) {
-      errs.push('This product was deleted — choose another');
-    }
-    const qty = Number(item.qty);
-    if (item.qty === '' || !Number.isInteger(qty) || qty <= 0) errs.push('Qty must be a whole number above 0');
-    if (item.cost === '' || isNaN(item.cost) || Number(item.cost) < 0) errs.push('Enter unit cost');
-    if (errs.length) rowErrors[item.id] = errs.join(' · ');
-  });
-
-  document.getElementById('err-supplier-name').textContent  = errors.supplierName  || '';
-  document.getElementById('err-supplier-phone').textContent = errors.supplierPhone || '';
-  purchaseFormState.errors = rowErrors;
-  renderPurchaseItems();
-
-  if (Object.keys(errors).length || Object.keys(rowErrors).length) {
-    showToast('Please fix validation errors', 'error');
-    return;
-  }
-
-  const items = purchaseFormState.items.map(item => {
-    if (item.isNew) {
-      return {
-        isNew: true,
-        productName: item.newName.trim(),
-        quantity: Number(item.qty),
-        unitCost: Number(item.cost),
-        sellingPrice: item.sellingPrice !== '' ? Number(item.sellingPrice) : null,
-      };
-    }
-    const product = state.products.find(p => p.id === item.productId);
-    return { productId: item.productId, productName: product.name, quantity: Number(item.qty), unitCost: Number(item.cost) };
-  });
-
-  const { subtotal, vatAmount, total } = purchaseFormTotals();
-  setPurchaseSubmitting(true);
-  recordPurchase(
-    { supplierName, supplierPhone, invoiceNo, paymentType: purchaseFormState.paymentType,
-      vatIncluded: purchaseFormState.vatIncluded, subtotal, vatAmount, total, items },
-    { updateCostPrice: purchaseFormState.updateCostPrice },
-  );
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DATE FILTER HELPERS
@@ -1361,7 +1027,7 @@ function dayLabel(iso) {
 
 function saleDraft() {
   if (!state.draft) {
-    state.draft = { customer: '', fromId: MAIN_BRANCH, toId: null, pay: 'cash', date: todayISO(), note: '', cart: [] };
+    state.draft = { customer: '', fromId: MAIN_BRANCH, toId: null, pay: 'cash', date: todayISO(), note: '', deliveryNote: '', cart: [] };
   }
   return state.draft;
 }
@@ -1401,7 +1067,6 @@ function renderSales() {
   const from = branchById(d.fromId);
   const to   = d.toId ? branchById(d.toId) : null;
   const t    = draftTotals();
-  const noteFocused = document.activeElement && document.activeElement.id === 'transfer-note';
 
   const brIc = (b) => `<span class="ic40 ${b && b.main ? 'ic-orange' : 'ic-ring'}">${ic('store')}</span>`;
 
@@ -1418,14 +1083,14 @@ function renderSales() {
         <span class="ini">${esc(initials(p.name))}</span>
         <div class="cl-text"><span class="cl-name">${esc(p.name)}</span><span class="cl-sub${over ? ' over' : ''}">${sub}</span></div>
         <div class="stepper">
-          <button onclick="stepLine(${i}, -1)" aria-label="Decrease">${ic('minus', 13, 2.4)}</button>
+          <button onclick="stepLine(${i}, -1)" aria-label="${l.qty === 1 ? 'Remove' : 'Decrease'}" class="${l.qty === 1 ? 'rm' : ''}">${l.qty === 1 ? ic('trash', 13, 2.2) : ic('minus', 13, 2.4)}</button>
           <span class="num">${l.qty}</span>
           <button onclick="stepLine(${i}, 1)" aria-label="Increase">${ic('plus', 13, 2.4)}</button>
         </div>
       </div>`;
   }).join('');
 
-  container.innerHTML = `
+  withFocusKept(() => { container.innerHTML = `
     <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Sales</span><span class="page-date">${sell ? 'Sell products to a customer' : 'Move stock between branches'}</span></div></div>
 
     <div class="mode-seg">
@@ -1434,12 +1099,19 @@ function renderSales() {
     </div>
 
     ${sell ? `
-    <div class="box">
-      <div class="pick-row"><span class="ic40 ic-blue">${ic('user')}</span><div class="pr-text"><span class="pr-label">Customer</span><span class="pr-value">${esc(d.customer || 'Walk-in customer')}</span></div><button class="chg-btn" onclick="openSheet('customer')">Change</button></div>
-      <div class="lc-div"></div>
-      <div class="pick-row"><span class="ic40 ic-orange">${ic('store')}</span><div class="pr-text"><span class="pr-label">Selling from</span><span class="pr-value">${esc(from.name)}</span></div><button class="chg-btn" onclick="openSheet('branch', 'from')">Change</button></div>
-      <div class="lc-div"></div>
-      <div class="pick-row"><span class="ic40 ic-green">${ic('calendar')}</span><div class="pr-text"><span class="pr-label">Date</span><span class="pr-value">${dayLabel(d.date)}</span></div><label class="chg-btn date-chg">Change<input type="date" id="sale-date" value="${d.date}" max="${todayISO()}" onchange="setSaleDate(this.value)" aria-label="Sale date"></label></div>
+    <div class="box move-card">
+      ${ddButton({ onclick: "openSheet('customer')", icon: 'user', tone: 'ic-blue', label: 'Customer · full name', value: esc(d.customer || 'Walk-in customer'), sub: d.customer ? 'Tap to change' : 'Tap to write a name', id: 'dd-customer' })}
+      ${ddButton({ onclick: "openSheet('branch', 'from')", icon: 'store', tone: 'ic-orange', label: 'Selling from', value: esc(from.name), sub: `${ic('pin', 11)}${esc(from.place || '—')}`, id: 'dd-from' })}
+      <label class="br-btn dd date-dd" for="sale-date">
+        <span class="ic40 ic-green">${ic('calendar')}</span>
+        <div class="pr-text"><span class="pr-label">Date</span><span class="pr-value">${dayLabel(d.date)}</span><span class="pr-place">${fmtDate(isoToDate(d.date))}</span></div>
+        <span class="br-chev">${ic('chevron', 16, 2.2)}</span>
+        <input type="date" id="sale-date" value="${d.date}" max="${todayISO()}" onchange="setSaleDate(this.value)" aria-label="Sale date">
+      </label>
+      <div class="note-field" style="padding:4px 2px 0">
+        <label class="pr-label" for="delivery-note">Delivery note <span class="hint">(optional)</span></label>
+        <input id="delivery-note" class="note-input" value="${esc(d.deliveryNote || '')}" placeholder="e.g. Deliver to the back door, call on arrival" autocomplete="off" oninput="saleDraft().deliveryNote = this.value">
+      </div>
     </div>` : `
     <div class="box move-card">
       <button class="br-btn" onclick="openSheet('branch', 'from')">${brIc(from)}<div class="pr-text"><span class="pr-label">From</span><span class="pr-value">${esc(from.name)}</span><span class="pr-place">${ic('pin', 11)}${esc(from.place || '—')}</span></div><span class="br-chev">${ic('chevron', 16, 2.2)}</span></button>
@@ -1477,12 +1149,7 @@ function renderSales() {
     <div class="box">
       <span class="box-title">${sell ? 'Recent sales' : 'Recent transfers'}</span>
       <div class="hist" id="sales-list-container">${sell ? salesHistory() : transfersHistory()}</div>
-    </div>`;
-
-  if (noteFocused) {
-    const el = document.getElementById('transfer-note');
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-  }
+    </div>`; });
 }
 
 function salesHistory() {
@@ -1526,6 +1193,7 @@ function renderSaleCard(s) {
       ${isOpen ? `
         <div class="hist-detail">
           <div class="txn-meta"><span>${fmtDate(recordDate(s))}</span>${s.branchName ? `<span>${esc(s.branchName)}</span>` : ''}<span>by ${esc(s.recordedBy || 'unknown')}</span></div>
+          ${s.deliveryNote ? `<div class="sheet-note" style="margin-bottom:8px">${ic('note', 13)} ${esc(s.deliveryNote)}</div>` : ''}
           ${items.map(it => `
             <div class="line-item">
               <div class="li-text"><b>${esc(it.productName)}</b><small>${it.quantity} × ${it.priceAtSale != null ? fmt(it.priceAtSale) : '—'}</small></div>
@@ -1535,6 +1203,7 @@ function renderSaleCard(s) {
             ${vat > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(subtotal)}</span></div><div class="tl"><span>VAT 15%</span><span class="num">${fmt(vat)}</span></div>` : ''}
             <div class="tl total"><span>Total</span><span class="num">${fmt(saleTotal(s))}</span></div>
           </div>
+          <button class="btn btn-danger btn-sm del-btn" onclick="askDeleteSale('${s.id}')">${ic('trash', 14)}Delete sale</button>
         </div>` : ''}
     </div>`;
 }
@@ -1607,6 +1276,7 @@ async function completeSale() {
     await recordSale({
       customerName: d.customer || 'Walk-in customer',
       saleDate: d.date,
+      deliveryNote: (d.deliveryNote || '').trim(),
       branchId: branch.id, branchName: branch.name,
       paymentType: d.pay, vatIncluded: false,
       subtotal: t.sub, vatAmount: t.vat, total: t.total,
@@ -1615,6 +1285,7 @@ async function completeSale() {
     });
     d.cart = [];
     d.date = todayISO();          // next sale starts on today again
+    d.deliveryNote = '';
     state.saleSubmitting = false;
     flashSalesToast(`Sale completed · SAR ${fmtNum(t.total)} · ${payName}`);
   } catch (e) {
@@ -1701,9 +1372,10 @@ async function saveBranch() {
     const ref = await userBranchesCol().add({ name, place, main: false, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
     const d = saleDraft();
     if (target === 'to') d.toId = ref.id;
+    if (target === 'receive') purchaseDraft().branchId = ref.id;
     closeSheet();
     showToast(`${name} added`);
-    renderSales();
+    renderCurrentPage();
   } catch (e) {
     console.error(e);
     showToast('Failed to add branch', 'error');
@@ -1756,7 +1428,11 @@ function renderSheet() {
   const sell = state.salesMode === 'sell';
   let title = '', sub = '', search = '', body = '', footer = '';
 
-  if (sh.kind === 'branch') {
+  if (sh.kind.startsWith('p-')) {
+    const spec = purchaseSheetSpec(sh);
+    if (!spec) { closeSheet(); return; }
+    ({ title, sub } = spec); search = spec.search || ''; body = spec.body || ''; footer = spec.footer || '';
+  } else if (sh.kind === 'branch') {
     title = sh.arg === 'to' ? 'Send to' : sell ? 'Sell from' : 'Send from';
     sub = 'Choose a branch by name or place';
     search = 'Search branch or city';
@@ -1766,8 +1442,8 @@ function renderSheet() {
     search = 'Search products';
   } else if (sh.kind === 'customer') {
     title = 'Customer';
-    sub = 'Type a name or pick a recent customer';
-    search = 'Customer name';
+    sub = 'Write a new customer’s full name, or pick a recent one';
+    search = 'Full name';
   } else if (sh.kind === 'price') {
     const line = d.cart[sh.arg];
     const p = line && state.products.find(x => x.id === line.productId);
@@ -1801,7 +1477,8 @@ function renderSheet() {
       </div>
       ${tr.note ? `<div class="sheet-note">${esc(tr.note)}</div>` : ''}
       <div class="move-sum"><span>${plural(tr.units || 0, 'unit')}</span><span class="num">Value ${fmt(tr.value || 0)}</span></div>
-      ${received ? '' : `<button class="btn btn-primary btn-block cta" onclick="receiveTransfer('${tr.id}')">${ic('check', 16, 2.6)}Mark as received at ${esc(shortBranch(tr.toName))}</button>`}`;
+      ${received ? '' : `<button class="btn btn-primary btn-block cta" onclick="receiveTransfer('${tr.id}')">${ic('check', 16, 2.6)}Mark as received at ${esc(shortBranch(tr.toName))}</button>`}
+      <button class="btn btn-danger btn-sm del-btn" onclick="askDeleteTransfer('${tr.id}')">${ic('trash', 14)}Delete transfer</button>`;
   }
 
   document.getElementById('modal-container').innerHTML = `
@@ -1810,14 +1487,14 @@ function renderSheet() {
       <div class="sheet" role="dialog" aria-label="${esc(title)}">
         <span class="sheet-handle"></span>
         <div class="sheet-head"><div class="sheet-head-text"><span class="sheet-title">${esc(title)}</span><span class="sheet-sub">${sub}</span></div><button class="sheet-close" onclick="closeSheet()" aria-label="Close">${ic('close', 14, 2.2)}</button></div>
-        ${search ? `<div class="sheet-search">${ic('search', 16, 2.2)}<input id="sheet-q" placeholder="${search}" value="${esc(state.sheetQuery)}" autocomplete="off" oninput="state.sheetQuery = this.value; renderSheetList()"${sh.kind === 'customer' ? ` onkeydown="if (event.key === 'Enter' && this.value.trim()) pickCustomer(this.value.trim())"` : ''}></div>
+        ${search ? `<div class="sheet-search">${ic('search', 16, 2.2)}<input id="sheet-q" placeholder="${search}" value="${esc(state.sheetQuery)}" autocomplete="off" oninput="state.sheetQuery = this.value; renderSheetList()" onkeydown="if (event.key === 'Enter') { const r = document.querySelector('#sheet-list .sheet-row:not(.dis)'); if (r) r.click(); }" aria-label="${search}"></div>
         <div class="sheet-list" id="sheet-list"></div>` : body}
         ${footer}
       </div>
     </div>`;
   if (search) renderSheetList();
-  const first = document.querySelector('#sheet-q, #price-input, #branch-name');
-  if (first && sh.kind !== 'branch' && sh.kind !== 'product') first.focus();
+  const first = document.querySelector('#sheet-q, #price-input, #branch-name, #cost-input, #vendor-name');
+  if (first && !['branch', 'p-branch', 'p-detail', 'transfer'].includes(sh.kind)) first.focus();
 }
 
 function renderSheetList() {
@@ -1827,6 +1504,7 @@ function renderSheetList() {
   const d = saleDraft();
   const q = state.sheetQuery.trim().toLowerCase();
 
+  if (sh.kind.startsWith('p-')) { renderPurchaseSheetList(sh, list, q); return; }
   if (sh.kind === 'branch') {
     const cur = sh.arg === 'to' ? d.toId : d.fromId;
     const other = state.salesMode === 'sell' ? null : sh.arg === 'to' ? d.fromId : d.toId;
@@ -1834,12 +1512,12 @@ function renderSheetList() {
       .filter(b => !q || `${b.name} ${b.place || ''}`.toLowerCase().includes(q))
       .map(b => {
         const on = b.id === cur, dis = b.id === other;
-        return `
+        return `<div class="sheet-row-wrap">
           <button class="sheet-row${on ? ' on' : ''}${dis ? ' dis' : ''}" ${dis ? 'disabled' : `onclick="pickBranch('${sh.arg}', '${b.id}')"`}>
             <span class="ic40 ${on ? 'ic-white' : b.main ? 'ic-orange' : 'ic-soft'}">${ic('store')}</span>
             <div class="pr-text"><span class="sr-name">${esc(b.name)}${b.main ? '<span class="main-badge">MAIN</span>' : ''}</span><span class="pr-place">${ic('pin', 11)}${esc(b.place || '—')} · ${branchUnits(b.id).toLocaleString()} units</span></div>
             <span class="sr-end-txt${on ? ' on' : ''}">${on ? 'Selected' : dis ? (sh.arg === 'to' ? 'Sending from' : 'Sending to') : ''}</span>
-          </button>`;
+          </button>${b.main ? '' : `<button class="row-del" onclick="askDeleteBranch('${b.id}')" aria-label="Delete ${esc(b.name)}" title="Delete branch">${ic('trash', 14)}</button>`}</div>`;
       }).join('');
     list.innerHTML = (rows || `<div class="sheet-empty">No branch matches “${esc(state.sheetQuery)}”</div>`) + `
       <button class="sheet-row" onclick="openSheet('addBranch', '${sh.arg}')">
@@ -1869,7 +1547,7 @@ function renderSheetList() {
     const current = d.customer || 'Walk-in customer';
     let html = '';
     if (typed && !names.some(n => n.toLowerCase() === typed.toLowerCase())) {
-      html += `<button class="sheet-row" onclick="pickCustomer(this.dataset.name)" data-name="${esc(typed)}"><span class="ic40 ic-orange">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Use “${esc(typed)}”</span><span class="pr-place">New customer</span></div></button>`;
+      html += `<button class="sheet-row" onclick="pickCustomer(this.dataset.name)" data-name="${esc(typed)}"><span class="ic40 ic-orange">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add “${esc(typed)}”</span><span class="pr-place">New customer</span></div></button>`;
     }
     html += names.map(n => `
       <button class="sheet-row${n === current ? ' on' : ''}" onclick="pickCustomer(this.dataset.name)" data-name="${esc(n)}">
@@ -1882,85 +1560,677 @@ function renderSheetList() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PURCHASES RENDERING
+// PURCHASES PAGE — buy stock from a vendor, or record a quick one-off buy
 // ══════════════════════════════════════════════════════════════════════════════
+
+const PO_TERMS = [
+  { id: 'paid',    t: 'Paid',    sub: 'In full'  },
+  { id: 'credit',  t: 'Credit',  sub: '30 days'  },
+  { id: 'partial', t: 'Partial', sub: 'Pay part' },
+];
+
+function purchaseDraft() {
+  if (!state.pdraft) state.pdraft = { vendor: '', branchId: MAIN_BRANCH, cart: [], date: todayISO(), term: 'paid', amountPaid: '' };
+  return state.pdraft;
+}
+function quickDraft() {
+  if (!state.qdraft) state.qdraft = { shop: '', item: '', productId: null, qty: 1, price: '', addStock: false, pay: 'cash', receipt: null };
+  return state.qdraft;
+}
+
+function purchaseType(p) { return p.type === 'quick' ? 'quick' : 'po'; }
+function purchaseDue(p) {
+  const total = purchaseTotal(p);
+  if (p.paymentStatus === 'credit')  return total;
+  if (p.paymentStatus === 'partial') return Math.max(0, total - (Number(p.amountPaid) || 0));
+  return 0;
+}
+function purchaseDueDate(p) { const d = recordDate(p); d.setDate(d.getDate() + 30); return d; }
+function purchaseTag(p) {
+  const due = purchaseDue(p);
+  if (due <= 0.004) return { cls: 'paid', t: 'Paid' };
+  const dueDate = purchaseDueDate(p);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (dueDate < today) return { cls: 'refunded', t: 'Due ' + dueDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) };
+  return { cls: 'in_transit', t: p.paymentStatus === 'partial' ? 'Partial' : 'Credit' };
+}
+
+function vendorsList() {
+  const map = new Map();
+  state.purchases.filter(p => purchaseType(p) === 'po' && p.supplierName).forEach(p => {
+    const name = p.supplierName.trim(), key = name.toLowerCase();
+    const v = map.get(key) || { name, count: 0, due: 0, last: null };
+    v.count += 1; v.due += purchaseDue(p);
+    const d = recordDate(p); if (!v.last || d > v.last) v.last = d;
+    map.set(key, v);
+  });
+  return [...map.values()].sort((a, b) => (b.last || 0) - (a.last || 0));
+}
+function recentShops() {
+  return [...new Set(state.purchases.filter(p => purchaseType(p) === 'quick' && p.shop).map(p => p.shop.trim()))].slice(0, 4);
+}
+
+function poTotals() {
+  const d = purchaseDraft();
+  const units = d.cart.reduce((s, l) => s + l.qty, 0);
+  const sub = d.cart.reduce((s, l) => s + (Number(l.cost) || 0) * l.qty, 0);
+  return { units, sub, vat: sub * VAT, total: sub * (1 + VAT) };
+}
+
+function syncPurchaseDraft() {
+  const d = purchaseDraft();
+  d.cart = d.cart.filter(l => l.isNew || state.products.some(p => p.id === l.productId));
+  if (!branchById(d.branchId)) d.branchId = MAIN_BRANCH;
+}
+
+// Keep focus + cursor in whatever field the user is typing in across re-renders
+function withFocusKept(render) {
+  const el = document.activeElement;
+  const id = el && el.id;
+  const pos = el && typeof el.selectionStart === 'number' ? [el.selectionStart, el.selectionEnd] : null;
+  render();
+  if (id) {
+    const again = document.getElementById(id);
+    if (again && again !== document.activeElement) {
+      again.focus();
+      if (pos && again.setSelectionRange) { try { again.setSelectionRange(pos[0], pos[1]); } catch (e) {} }
+    }
+  }
+}
 
 function renderPurchases() {
   const container = document.getElementById('purchases-page');
   if (!container) return;
-  const totalSpent = state.purchases.reduce((s, x) => s + purchaseTotal(x), 0);
-  const sub = `${plural(state.purchases.length, 'purchase')} · ${fmt(totalSpent)} total spent`;
-
-  if (!document.getElementById('purchases-list-container')) {
-    container.innerHTML = `
-      <div class="page-head"><div class="page-head-text"><span class="page-title">Purchases</span><span class="page-date" id="purchases-sub"></span></div></div>
-      <div class="head-actions"><button class="btn btn-primary" onclick="openPurchaseForm(); return false;">${ic('cart')}New purchase</button></div>
-      <div class="search">${ic('search', 17)}<input type="search" id="purchases-search" placeholder="Search by supplier, invoice or product…" autocomplete="off" oninput="renderPurchasesList()"></div>
-      <div class="box">
-        <div class="box-head"><div class="box-head-text"><span class="box-title">Purchase log</span><span class="box-sub">Every purchase adds its items to stock</span></div></div>
-        <div id="purchases-list-container" class="box-list"></div>
-      </div>`;
-  }
-  document.getElementById('purchases-sub').textContent = sub;
-  renderPurchasesList();
+  withFocusKept(() => { container.innerHTML = purchasesPageHTML(); });
 }
 
-function renderPurchasesList() {
-  const container = document.getElementById('purchases-list-container');
-  if (!container) return;
-
-  const term = (document.getElementById('purchases-search')?.value || '').toLowerCase();
-  const filtered = state.purchases.filter(p =>
-    (p.supplierName ?? '').toLowerCase().includes(term) ||
-    (p.supplierPhone ?? '').includes(term) ||
-    (p.invoiceNo ?? '').toLowerCase().includes(term) ||
-    (p.items ?? []).some(it => (it.productName ?? '').toLowerCase().includes(term)));
-
-  if (filtered.length === 0) {
-    container.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('cart', 20)}</span>
-      <span class="empty-title">${state.purchases.length === 0 ? 'No purchases yet' : 'No results found'}</span>
-      <span class="empty-text">${state.purchases.length === 0 ? 'Record a purchase and its items are added to stock automatically' : 'Try adjusting your search'}</span></div>`;
-    return;
-  }
-  container.innerHTML = filtered.map(renderPurchaseCard).join('');
-}
-
-function renderPurchaseCard(p) {
-  const items  = p.items ?? [];
-  const total  = purchaseTotal(p);
-  const units  = purchaseUnits(p);
-  const isOpen = state.expandedPurchases[p.id];
-  const pt     = payOf(p);
-  const idx    = state.purchases.findIndex(x => x.id === p.id);
-  const num    = String(state.purchases.length - idx).padStart(4, '0');
-  const ts     = toDate(p.timestamp);
-  const subtotal  = typeof p.subtotal  === 'number' ? p.subtotal  : items.reduce((s, it) => s + (it.unitCost ?? 0) * it.quantity, 0);
-  const vatAmount = typeof p.vatAmount === 'number' ? p.vatAmount : 0;
-
+function purchasesPageHTML() {
+  syncPurchaseDraft();
+  const po = state.purchaseMode !== 'quick';
   return `
-    <div class="txn${isOpen ? ' open' : ''}">
-      <button class="txn-main" onclick="togglePurchaseExpand('${p.id}')" aria-expanded="${isOpen ? 'true' : 'false'}">
-        <span class="ic ic-purple">${ic('factory')}</span>
-        <div class="sr-text"><span class="sr-title">${esc(p.supplierName || 'Unknown supplier')}</span><span class="sr-sub">${fmtDate(ts)} · +${units} units${p.invoiceNo ? ` · ${esc(p.invoiceNo)}` : ''}</span></div>
-        <div class="sr-end"><span class="sr-val purple">${fmt(total)}</span><span class="tag ${pt}">${PAY_NAME[pt]}</span></div>
-        <span class="txn-chev">${ic('chevron')}</span>
-      </button>
-      ${isOpen ? `
-        <div class="txn-detail">
-          <div class="txn-meta"><span>PO-${num}</span><span>${ts.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>${p.supplierPhone ? `<span>${esc(p.supplierPhone)}</span>` : ''}<span>by ${esc(p.recordedBy || 'unknown')}</span></div>
-          ${items.map(it => `
-            <div class="line-item">
-              <span class="ic ic-green" style="width:30px;height:30px;">${ic('inbox', 14)}</span>
-              <div class="li-text"><b>${esc(it.productName)} ${it.isNewProduct ? '<span class="tag new">NEW</span>' : ''}</b><small><span style="color:var(--green);font-weight:600;">+${it.quantity}</span> unit${it.quantity !== 1 ? 's' : ''} × ${fmt(it.unitCost ?? 0)}</small></div>
-              <span class="amt">${fmt((it.unitCost ?? 0) * it.quantity)}</span>
-            </div>`).join('')}
-          ${vatAmount > 0 ? `<div class="txn-lines"><div class="summary-line"><span>Subtotal</span><strong>${fmt(subtotal)}</strong></div><div class="summary-line"><span>VAT (15%)</span><strong>${fmt(vatAmount)}</strong></div></div>` : ''}
-          <div class="txn-total purple"><span class="lbl">Total cost<small>${units} unit${units !== 1 ? 's' : ''} added · paid by ${PAY_NAME[pt].toLowerCase()}</small></span><span class="val">${fmt(total)}</span></div>
-        </div>` : ''}
+    <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Purchases</span><span class="page-date">${po ? 'Buy stock from a vendor' : 'Record a one-off buy from a shop'}</span></div></div>
+
+    <div class="mode-seg" role="tablist" aria-label="Purchase type">
+      ${[['po', 'From vendor', 'truck'], ['quick', 'Quick buy', 'bag']].map(([k, label, icon]) =>
+        `<button class="mode-btn${(po ? 'po' : 'quick') === k ? ' active' : ''}" role="tab" aria-selected="${(po ? 'po' : 'quick') === k}" onclick="setPurchaseMode('${k}')">${ic(icon, 15)}${label}</button>`).join('')}
+    </div>
+
+    ${po ? poFormHTML() : quickFormHTML()}
+
+    ${state.purchasesToast ? `<div class="inline-toast" role="status"><span class="it-ic">${ic('check', 13, 3)}</span><span>${esc(state.purchasesToast)}</span></div>` : ''}
+
+    <div class="box">
+      <span class="box-title">Recent purchases</span>
+      <div class="hist" id="purchases-list-container">${purchasesHistory()}</div>
     </div>`;
 }
 
-function togglePurchaseExpand(id) {
-  state.expandedPurchases[id] = !state.expandedPurchases[id];
-  renderPurchasesList();
+function ddButton({ onclick, icon, tone, label, value, sub, id }) {
+  return `
+    <button class="br-btn dd" ${id ? `id="${id}"` : ''} onclick="${onclick}" aria-haspopup="dialog">
+      <span class="ic40 ${tone}">${ic(icon)}</span>
+      <div class="pr-text"><span class="pr-label">${label}</span><span class="pr-value">${value}</span>${sub ? `<span class="pr-place">${sub}</span>` : ''}</div>
+      <span class="br-chev">${ic('chevron', 16, 2.2)}</span>
+    </button>`;
+}
+
+function poFormHTML() {
+  const d = purchaseDraft();
+  const br = branchById(d.branchId);
+  const t = poTotals();
+  const ven = d.vendor ? vendorsList().find(v => v.name.toLowerCase() === d.vendor.toLowerCase()) : null;
+  const venSub = !d.vendor ? 'Tap to choose or add a supplier'
+    : ven ? `${plural(ven.count, 'purchase')}${ven.due > 0 ? ` · ${fmt(ven.due)} due` : ''}` : 'New vendor';
+
+  const lines = d.cart.map((l, i) => {
+    const p = l.isNew ? null : state.products.find(x => x.id === l.productId);
+    const name = l.isNew ? l.name : p.name;
+    const costSet = l.cost !== '' && l.cost != null && !isNaN(l.cost);
+    return `
+      <div class="cart-line">
+        <span class="ini">${esc(initials(name))}</span>
+        <div class="cl-text"><span class="cl-name">${esc(name)}${l.isNew ? ' <span class="tag new">NEW</span>' : ''}</span>
+          <span class="cl-sub"><button class="price-link${costSet ? '' : ' missing'}" onclick="openSheet('p-cost', ${i})" aria-label="Change cost for ${esc(name)}">${costSet ? 'Cost SAR ' + fmtNum(l.cost) : 'Set cost'}</button>${costSet ? ' · SAR ' + fmtNum(Number(l.cost) * l.qty) : ''}</span></div>
+        <div class="stepper">
+          <button onclick="stepPurchaseLine(${i}, -1)" aria-label="${l.qty === 1 ? 'Remove' : 'Decrease'} ${esc(name)}" class="${l.qty === 1 ? 'rm' : ''}">${l.qty === 1 ? ic('trash', 13, 2.2) : ic('minus', 13, 2.4)}</button>
+          <span class="num" aria-live="polite">${l.qty}</span>
+          <button onclick="stepPurchaseLine(${i}, 1)" aria-label="Increase ${esc(name)}">${ic('plus', 13, 2.4)}</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="box move-card">
+      ${ddButton({ onclick: "openSheet('p-vendor')", icon: 'truck', tone: 'ic-blue', label: 'Vendor', value: d.vendor ? esc(d.vendor) : 'Choose vendor', sub: esc(venSub), id: 'dd-vendor' })}
+      ${ddButton({ onclick: "openSheet('p-branch')", icon: 'store', tone: 'ic-orange', label: 'Receive at', value: esc(br.name), sub: `${ic('pin', 11)}${esc(br.place || '—')}`, id: 'dd-receive' })}
+    </div>
+
+    <div class="box">
+      <div class="box-head"><span class="box-title">Items</span><span class="box-sub">${plural(t.units, 'unit')}</span></div>
+      ${d.cart.length ? `<div class="cart-lines">${lines}</div>` : ''}
+      <button class="add-line-btn" onclick="openSheet('p-product')">${ic('plus', 14, 2.4)}Add product</button>
+    </div>
+
+    <div class="box">
+      <span class="box-title">Bill</span>
+      <div class="note-field">
+        <span class="pr-label">Bill date</span>
+        <label class="date-field">${ic('calendar', 14)}<span>${fmtDate(isoToDate(d.date))}</span><input type="date" id="purchase-date" value="${d.date}" max="${todayISO()}" onchange="setPurchaseDate(this.value)" aria-label="Bill date"></label>
+      </div>
+      <div class="note-field">
+        <span class="pr-label">Payment</span>
+        <div class="pay3">${PO_TERMS.map(term => `
+          <button class="pay3-btn term${d.term === term.id ? ' active' : ''}" onclick="setPurchaseTerm('${term.id}')" aria-pressed="${d.term === term.id}">${term.t}<span class="term-sub">${term.sub}</span></button>`).join('')}</div>
+      </div>
+      ${d.term === 'partial' ? `
+      <div class="note-field">
+        <span class="pr-label">Amount paid now</span>
+        <div class="sar-field"><span>SAR</span><input type="number" id="amount-paid" min="0" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(d.amountPaid)}" oninput="purchaseDraft().amountPaid = this.value"></div>
+      </div>` : ''}
+      <div class="totals">
+        <div class="tl"><span>Subtotal</span><span class="num">SAR ${fmtNum(t.sub)}</span></div>
+        <div class="tl"><span>VAT 15%</span><span class="num">SAR ${fmtNum(t.vat)}</span></div>
+        <div class="lc-div"></div>
+        <div class="tl total"><span>Total</span><span class="num">SAR ${fmtNum(t.total)}</span></div>
+      </div>
+      <button class="btn btn-primary btn-block cta" id="btn-save-po" onclick="savePurchase()" ${state.purchaseSubmitting ? 'disabled' : ''}>${ic('check', 16, 2.6)}${state.purchaseSubmitting ? 'Saving…' : 'Save purchase'}</button>
+    </div>`;
+}
+
+function quickFormHTML() {
+  const q = quickDraft();
+  const total = (Number(q.price) || 0) * q.qty;
+  const shops = recentShops();
+  return `
+    <div class="box">
+      <div class="note-field">
+        <label class="pr-label" for="quick-shop">Bought from</label>
+        <div class="icon-field">${ic('bag', 16)}<input id="quick-shop" placeholder="Shop or market name" value="${esc(q.shop)}" autocomplete="off" oninput="quickDraft().shop = this.value"></div>
+        ${shops.length ? `<div class="chip-row">${shops.map(s => `<button class="chip-btn" onclick="setQuickShop(this.dataset.v)" data-v="${esc(s)}">${esc(s)}</button>`).join('')}</div>` : ''}
+      </div>
+      <div class="note-field">
+        <label class="pr-label" for="quick-item">Item</label>
+        <input id="quick-item" class="note-input" placeholder="What did you buy?" value="${esc(q.item)}" autocomplete="off" oninput="setQuickItem(this.value)">
+        <div class="chip-row" id="quick-item-matches">${quickMatchesHTML()}</div>
+      </div>
+      <div class="qty-price">
+        <div class="note-field">
+          <span class="pr-label">Qty</span>
+          <div class="stepper big">
+            <button onclick="stepQuickQty(-1)" aria-label="Decrease quantity">${ic('minus', 13, 2.4)}</button>
+            <span class="num" id="quick-qty">${q.qty}</span>
+            <button onclick="stepQuickQty(1)" aria-label="Increase quantity">${ic('plus', 13, 2.4)}</button>
+          </div>
+        </div>
+        <div class="note-field">
+          <label class="pr-label" for="quick-price">Price per piece</label>
+          <div class="sar-field"><span>SAR</span><input type="number" id="quick-price" min="0" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(q.price)}" oninput="setQuickPrice(this.value)"></div>
+        </div>
+      </div>
+      <button class="toggle-row" role="switch" aria-checked="${q.addStock}" onclick="toggleQuickStock()">
+        <span class="tr-text"><span class="tr-title">Add to inventory</span><span class="tr-sub">${q.addStock ? `Will be added to ${esc(branchById(MAIN_BRANCH).name)} stock` : 'Expense only, not for resale'}</span></span>
+        <span class="switch${q.addStock ? ' on' : ''}"><span></span></span>
+      </button>
+    </div>
+
+    <div class="box">
+      <div class="note-field">
+        <span class="pr-label">Paid by</span>
+        <div class="pay3">${PAYMENT_TYPES.map(pt =>
+          `<button class="pay3-btn${q.pay === pt.id ? ' active' : ''}" style="height:60px" onclick="quickDraft().pay='${pt.id}'; renderPurchases()" aria-pressed="${q.pay === pt.id}">${ic(PAY_IC[pt.id], 18, 1.9)}${pt.label}</button>`).join('')}</div>
+      </div>
+      ${q.receipt ? `
+        <div class="receipt-row">
+          <img src="${q.receipt}" alt="Receipt photo">
+          <div class="tr-text"><span class="tr-title">Receipt added</span><span class="tr-sub">Saved with this purchase</span></div>
+          <button class="chg-btn" onclick="quickDraft().receipt = null; renderPurchases()">Remove</button>
+        </div>` : `
+        <label class="receipt-btn">${ic('camera', 17)}Add receipt photo<input type="file" accept="image/*" capture="environment" onchange="addReceiptPhoto(this)"></label>`}
+      <div class="tl total"><span>Total</span><span class="num" id="quick-total">SAR ${fmtNum(total)}</span></div>
+      <button class="btn btn-primary btn-block cta" id="btn-save-quick" onclick="saveQuickPurchase()" ${state.purchaseSubmitting ? 'disabled' : ''}>${ic('check', 16, 2.6)}${state.purchaseSubmitting ? 'Saving…' : 'Save purchase'}</button>
+    </div>`;
+}
+
+function quickMatchesHTML() {
+  const q = quickDraft();
+  const term = q.item.trim().toLowerCase();
+  if (q.productId) {
+    const p = state.products.find(x => x.id === q.productId);
+    return p ? `<span class="chip-btn on">${ic('check', 12, 2.6)}${esc(p.name)} · in inventory</span>` : '';
+  }
+  if (!term) return '';
+  return state.products.filter(p => (p.name || '').toLowerCase().includes(term)).slice(0, 4)
+    .map(p => `<button class="chip-btn" onclick="pickQuickProduct('${p.id}')">${esc(p.name)}</button>`).join('');
+}
+
+function purchasesHistory() {
+  if (!state.purchases.length) return `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('cart', 20)}</span><span class="empty-title">No purchases yet</span><span class="empty-text">Saved purchases will appear here</span></div>`;
+  const list = state.purchases.slice(0, state.purchaseHistLimit);
+  return list.map(p => {
+    const quick = purchaseType(p) === 'quick';
+    const tag = purchaseTag(p);
+    const units = purchaseUnits(p);
+    const when = whenLabel(recordDate(p), p.timestamp);
+    const meta = quick
+      ? `${esc(p.itemName || 'Item')} × ${p.quantity || units || 1} · ${when}`
+      : `${esc(p.poNo || 'PO')} · ${plural(units, 'unit')} · ${when}`;
+    return `
+      <button class="hist-row" onclick="openSheet('p-detail', '${p.id}')">
+        <span class="ic ${quick ? 'ic-orange' : 'ic-blue'}">${ic(quick ? 'bag' : 'truck', 15)}</span>
+        <div class="pr-text"><span class="cl-name">${esc(quick ? (p.shop || 'Quick buy') : (p.supplierName || 'Unknown vendor'))}</span><span class="pr-label">${meta}</span></div>
+        <div class="sr-end"><span class="h-amt num">${fmt(purchaseTotal(p))}</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
+      </button>`;
+  }).join('') + (state.purchases.length > state.purchaseHistLimit
+    ? `<button class="more-btn" onclick="state.purchaseHistLimit += 15; renderPurchases()">Show more (${state.purchases.length - state.purchaseHistLimit})</button>` : '');
+}
+
+// ── Actions ──────────────────────────────────────────────────────────────────
+function isoToDate(iso) { const [y, m, d] = String(iso).split('-').map(Number); return new Date(y, m - 1, d); }
+function setPurchaseMode(m) { state.purchaseMode = m; state.purchasesToast = ''; renderPurchases(); }
+function setPurchaseDate(v) { if (/^\d{4}-\d{2}-\d{2}$/.test(v) && v <= todayISO()) purchaseDraft().date = v; renderPurchases(); }
+function setPurchaseTerm(t) { purchaseDraft().term = t; renderPurchases(); }
+function stepPurchaseLine(i, delta) {
+  const d = purchaseDraft(); const l = d.cart[i]; if (!l) return;
+  l.qty = Math.max(0, l.qty + delta);
+  if (l.qty === 0) d.cart.splice(i, 1);
+  renderPurchases();
+}
+function addPurchaseLine(productId) {
+  const d = purchaseDraft();
+  const p = state.products.find(x => x.id === productId); if (!p) return;
+  const ex = d.cart.find(l => l.productId === productId);
+  if (ex) ex.qty += 1;
+  else d.cart.push({ productId, qty: 1, cost: p.costPrice != null ? String(p.costPrice) : '' });
+  closeSheet(); renderPurchases();
+}
+function addNewPurchaseProduct(name) {
+  name = String(name || '').trim(); if (!name) return;
+  const existing = state.products.find(p => (p.name || '').trim().toLowerCase() === name.toLowerCase());
+  if (existing) { addPurchaseLine(existing.id); return; }
+  const d = purchaseDraft();
+  if (!d.cart.some(l => l.isNew && l.name.toLowerCase() === name.toLowerCase())) d.cart.push({ isNew: true, name, qty: 1, cost: '', sellingPrice: '' });
+  closeSheet(); renderPurchases();
+  openSheet('p-cost', d.cart.findIndex(l => l.isNew && l.name.toLowerCase() === name.toLowerCase()));
+}
+function saveNewVendor() {
+  const v = document.getElementById('vendor-name').value.trim();
+  if (!v) { document.getElementById('err-vendor-name').textContent = 'Vendor name is required'; return; }
+  pickVendor(v);
+}
+function pickVendor(name) { purchaseDraft().vendor = String(name || '').trim(); closeSheet(); renderPurchases(); }
+function pickReceiveBranch(id) { purchaseDraft().branchId = id; closeSheet(); renderPurchases(); }
+function saveCost(i) {
+  const d = purchaseDraft(); const l = d.cart[i];
+  const v = document.getElementById('cost-input').value;
+  const err = document.getElementById('err-cost');
+  if (v === '' || isNaN(v) || Number(v) < 0) { err.textContent = 'Enter a valid cost'; return; }
+  if (l) {
+    l.cost = String(Number(v));
+    const sp = document.getElementById('sell-input');
+    if (sp && l.isNew) l.sellingPrice = sp.value;
+  }
+  closeSheet(); renderPurchases();
+}
+
+function setQuickShop(v) { quickDraft().shop = v; renderPurchases(); }
+function setQuickItem(v) {
+  const q = quickDraft(); q.item = v;
+  const p = q.productId && state.products.find(x => x.id === q.productId);
+  if (p && p.name !== v) q.productId = null;
+  const box = document.getElementById('quick-item-matches');
+  if (box) box.innerHTML = quickMatchesHTML();
+}
+function pickQuickProduct(id) {
+  const q = quickDraft(); const p = state.products.find(x => x.id === id); if (!p) return;
+  q.productId = id; q.item = p.name; q.addStock = true;
+  if (!q.price && p.costPrice != null) q.price = String(p.costPrice);
+  renderPurchases();
+}
+function stepQuickQty(delta) { const q = quickDraft(); q.qty = Math.max(1, q.qty + delta); renderPurchases(); }
+function setQuickPrice(v) {
+  const q = quickDraft(); q.price = v;
+  const el = document.getElementById('quick-total');
+  if (el) el.textContent = 'SAR ' + fmtNum((Number(v) || 0) * q.qty);
+}
+function toggleQuickStock() { const q = quickDraft(); q.addStock = !q.addStock; renderPurchases(); }
+
+function addReceiptPhoto(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 1000, scale = Math.min(1, max / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale); canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      let quality = 0.72, data = canvas.toDataURL('image/jpeg', quality);
+      while (data.length > 850000 && quality > 0.3) { quality -= 0.12; data = canvas.toDataURL('image/jpeg', quality); }
+      quickDraft().receipt = data;
+      renderPurchases();
+    };
+    img.onerror = () => showToast('That file is not a photo', 'error');
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function flashPurchasesToast(msg) {
+  state.purchasesToast = msg;
+  renderPurchases();
+  clearTimeout(flashPurchasesToast._t);
+  flashPurchasesToast._t = setTimeout(() => { state.purchasesToast = ''; if (state.currentPage === 'purchases') renderPurchases(); }, 3000);
+}
+
+async function savePurchase() {
+  if (state.purchaseSubmitting) return;
+  const d = purchaseDraft();
+  const br = branchById(d.branchId);
+  if (!d.vendor) { showToast('Choose a vendor', 'error'); openSheet('p-vendor'); return; }
+  if (!d.cart.length) { showToast('Add at least one product', 'error'); return; }
+  const missing = d.cart.find(l => l.cost === '' || l.cost == null || isNaN(l.cost));
+  if (missing) { showToast(`Set the cost for ${missing.isNew ? missing.name : state.products.find(p => p.id === missing.productId).name}`, 'error'); openSheet('p-cost', d.cart.indexOf(missing)); return; }
+  const t = poTotals();
+  let amountPaid = t.total;
+  if (d.term === 'credit') amountPaid = 0;
+  if (d.term === 'partial') {
+    amountPaid = Number(d.amountPaid);
+    if (d.amountPaid === '' || isNaN(amountPaid) || amountPaid < 0 || amountPaid >= t.total) { showToast('Enter how much you paid now (less than the total)', 'error'); document.getElementById('amount-paid')?.focus(); return; }
+  }
+  const items = d.cart.map(l => l.isNew
+    ? { isNew: true, productName: l.name, quantity: l.qty, unitCost: Number(l.cost), sellingPrice: l.sellingPrice !== '' && !isNaN(l.sellingPrice) ? Number(l.sellingPrice) : null }
+    : { productId: l.productId, productName: state.products.find(p => p.id === l.productId).name, quantity: l.qty, unitCost: Number(l.cost) });
+  const poCount = state.purchases.filter(p => purchaseType(p) === 'po').length;
+  state.purchaseSubmitting = true; renderPurchases();
+  try {
+    await recordPurchase({
+      type: 'po', supplierName: d.vendor, branchId: br.id, branchName: br.name,
+      purchaseDate: d.date, paymentStatus: d.term, amountPaid,
+      subtotal: t.sub, vatAmount: t.vat, total: t.total,
+      poNo: 'PO-' + String(poCount + 1).padStart(3, '0'),
+      items,
+    });
+    state.pdraft = { vendor: d.vendor, branchId: d.branchId, cart: [], date: todayISO(), term: 'paid', amountPaid: '' };
+    state.purchaseSubmitting = false;
+    flashPurchasesToast(`Purchase saved · ${d.vendor} · SAR ${fmtNum(t.total)}`);
+  } catch (e) {
+    console.error(e);
+    state.purchaseSubmitting = false; renderPurchases();
+    showToast('Failed to save purchase', 'error');
+  }
+}
+
+async function saveQuickPurchase() {
+  if (state.purchaseSubmitting) return;
+  const q = quickDraft();
+  const item = q.item.trim(), price = Number(q.price);
+  if (!item) { showToast('Enter what you bought', 'error'); document.getElementById('quick-item')?.focus(); return; }
+  if (q.price === '' || isNaN(price) || price <= 0) { showToast('Enter the price per piece', 'error'); document.getElementById('quick-price')?.focus(); return; }
+  const total = price * q.qty;
+  let items = [];
+  if (q.addStock) {
+    const p = q.productId ? state.products.find(x => x.id === q.productId)
+      : state.products.find(x => (x.name || '').trim().toLowerCase() === item.toLowerCase());
+    items = [p ? { productId: p.id, productName: p.name, quantity: q.qty, unitCost: price }
+               : { isNew: true, productName: item, quantity: q.qty, unitCost: price, sellingPrice: null }];
+  }
+  state.purchaseSubmitting = true; renderPurchases();
+  try {
+    await recordPurchase({
+      type: 'quick', shop: q.shop.trim(), itemName: item, quantity: q.qty, unitCost: price,
+      addToInventory: q.addStock, branchId: MAIN_BRANCH, branchName: branchById(MAIN_BRANCH).name,
+      purchaseDate: todayISO(), paymentStatus: 'paid', amountPaid: total, paymentType: q.pay,
+      subtotal: total, vatAmount: 0, total,
+      receiptImage: q.receipt || null,
+      items,
+    });
+    state.qdraft = null;
+    state.purchaseSubmitting = false;
+    flashPurchasesToast(`Saved · ${item} · SAR ${fmtNum(total)}`);
+  } catch (e) {
+    console.error(e);
+    state.purchaseSubmitting = false; renderPurchases();
+    showToast('Failed to save purchase', 'error');
+  }
+}
+
+async function markPurchasePaid(id) {
+  const p = state.purchases.find(x => x.id === id); if (!p) return;
+  try {
+    await userPurchasesCol().doc(id).update({ paymentStatus: 'paid', amountPaid: purchaseTotal(p), paidAt: firebase.firestore.FieldValue.serverTimestamp() });
+    closeSheet();
+    flashPurchasesToast(`Marked as paid · ${p.supplierName || p.shop || 'Purchase'}`);
+  } catch (e) { console.error(e); showToast('Failed to update payment', 'error'); }
+}
+
+async function showReceipt(id) {
+  const box = document.getElementById('receipt-view');
+  if (!box) return;
+  box.innerHTML = `<div class="sheet-empty">Loading receipt…</div>`;
+  try {
+    const snap = await userCol('receipts').doc(id).get();
+    const data = snap && (typeof snap.data === 'function' ? snap.data() : null);
+    box.innerHTML = data && data.image ? `<img class="receipt-full" src="${data.image}" alt="Receipt photo">` : `<div class="sheet-empty">No receipt found</div>`;
+  } catch (e) { console.error(e); box.innerHTML = `<div class="sheet-empty">Could not load the receipt</div>`; }
+}
+
+// Restock buttons (Inventory, Dashboard) open a vendor purchase with that product
+function openPurchaseForm(productId = '') {
+  state.purchaseMode = 'po';
+  const p = productId && state.products.find(x => x.id === productId);
+  if (p) {
+    const d = purchaseDraft();
+    if (!d.cart.some(l => l.productId === p.id)) d.cart.push({ productId: p.id, qty: 1, cost: p.costPrice != null ? String(p.costPrice) : '' });
+  }
+  navigateTo('purchases');
+}
+
+// ── Purchase sheets (plugged into the shared bottom sheet) ───────────────────
+function purchaseSheetSpec(sh) {
+  const d = purchaseDraft();
+  if (sh.kind === 'p-vendor') return { title: 'Choose vendor', sub: 'Suppliers you buy from', search: 'Search or type a new vendor name',
+    footer: `<button class="add-line-btn" onclick="openSheet('p-newvendor')">${ic('plus', 14, 2.4)}New vendor</button>` };
+  if (sh.kind === 'p-newvendor') return { title: 'New vendor', sub: 'Add a supplier you buy from', body: `
+      <div class="sheet-form">
+        <div class="field"><label for="vendor-name">Vendor name <span class="req">*</span></label><input type="text" id="vendor-name" placeholder="e.g. Gulf Traders" autocomplete="off" onkeydown="if (event.key === 'Enter') saveNewVendor()"><span class="err-msg" id="err-vendor-name"></span></div>
+        <button class="btn btn-primary btn-block cta" onclick="saveNewVendor()">${ic('check', 16, 2.6)}Use this vendor</button>
+      </div>` };
+  if (sh.kind === 'p-branch') return { title: 'Receive at', sub: 'Which of your stores gets this stock', search: 'Search branch or city' };
+  if (sh.kind === 'p-product') return { title: 'Add product', sub: 'All products · search or add a new one', search: 'Search products or type a new name' };
+  if (sh.kind === 'p-cost') {
+    const l = d.cart[sh.arg];
+    const name = l ? (l.isNew ? l.name : (state.products.find(p => p.id === l.productId) || {}).name) : '';
+    return { title: 'Cost', sub: `Buying price per unit for ${esc(name || '')}`, body: `
+      <div class="sheet-form">
+        <div class="sar-input big"><span>SAR</span><input type="number" id="cost-input" min="0" step="0.01" inputmode="decimal" value="${esc(l ? l.cost : '')}" placeholder="0.00" onkeydown="if (event.key === 'Enter') saveCost(${sh.arg})" aria-label="Cost per unit"></div>
+        <span class="err-msg" id="err-cost"></span>
+        ${l && l.isNew ? `<div class="field"><label for="sell-input">Selling price <span class="hint">(optional)</span></label><div class="sar-input"><span>SAR</span><input type="number" id="sell-input" min="0" step="0.01" inputmode="decimal" value="${esc(l.sellingPrice || '')}" placeholder="0.00"></div></div>` : ''}
+        <button class="btn btn-primary btn-block cta" onclick="saveCost(${sh.arg})">${ic('check', 16, 2.6)}Save cost</button>
+      </div>` };
+  }
+  if (sh.kind === 'p-detail') {
+    const p = state.purchases.find(x => x.id === sh.arg);
+    if (!p) return null;
+    const quick = purchaseType(p) === 'quick';
+    const due = purchaseDue(p);
+    const tag = purchaseTag(p);
+    const items = p.items || [];
+    return {
+      title: quick ? (p.shop || 'Quick buy') : (p.supplierName || 'Purchase'),
+      sub: `${esc(quick ? 'Quick buy' : (p.poNo || 'PO'))} · ${fmtDate(recordDate(p))}${p.branchName ? ' · ' + esc(p.branchName) : ''}`,
+      body: `
+        <div class="sheet-list">
+          ${quick ? `<div class="cart-line"><span class="ini">${esc(initials(p.itemName))}</span><div class="cl-text"><span class="cl-name">${esc(p.itemName || 'Item')}</span><span class="cl-sub">${p.quantity} × ${fmt(p.unitCost || 0)}${p.addToInventory ? ' · added to stock' : ' · expense'}</span></div><span class="h-amt num">${fmt(purchaseTotal(p))}</span></div>`
+          : items.map(it => `<div class="cart-line"><span class="ini">${esc(initials(it.productName))}</span><div class="cl-text"><span class="cl-name">${esc(it.productName)}${it.isNewProduct ? ' <span class="tag new">NEW</span>' : ''}</span><span class="cl-sub">+${it.quantity} × ${fmt(it.unitCost || 0)}</span></div><span class="h-amt num">${fmt((it.unitCost || 0) * it.quantity)}</span></div>`).join('')}
+        </div>
+        <div class="totals">
+          ${(p.vatAmount || 0) > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(p.subtotal || 0)}</span></div><div class="tl"><span>VAT 15%</span><span class="num">${fmt(p.vatAmount)}</span></div>` : ''}
+          <div class="tl total"><span>Total</span><span class="num">${fmt(purchaseTotal(p))}</span></div>
+          <div class="tl"><span>Status</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
+          ${due > 0 ? `<div class="tl"><span>Paid</span><span class="num">${fmt(purchaseTotal(p) - due)}</span></div><div class="tl"><span>Still to pay</span><span class="num" style="color:var(--red);font-weight:600">${fmt(due)}</span></div>` : ''}
+        </div>
+        ${p.hasReceipt ? `<div id="receipt-view"><button class="more-btn" style="width:100%" onclick="showReceipt('${p.id}')">${''}View receipt photo</button></div>` : ''}
+        ${due > 0 ? `<button class="btn btn-primary btn-block cta" onclick="markPurchasePaid('${p.id}')">${ic('check', 16, 2.6)}Mark as paid</button>` : ''}
+        <button class="btn btn-danger btn-sm del-btn" onclick="askDeletePurchase('${p.id}')">${ic('trash', 14)}Delete purchase</button>` };
+  }
+  return null;
+}
+
+function renderPurchaseSheetList(sh, list, q) {
+  const d = purchaseDraft();
+  const typed = state.sheetQuery.trim();
+  if (sh.kind === 'p-vendor') {
+    const vendors = vendorsList().filter(v => !q || v.name.toLowerCase().includes(q));
+    let html = '';
+    if (typed && !vendorsList().some(v => v.name.toLowerCase() === typed.toLowerCase())) {
+      html += `<button class="sheet-row" onclick="pickVendor(this.dataset.v)" data-v="${esc(typed)}"><span class="ic40 ic-orange">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add “${esc(typed)}”</span><span class="pr-place">New vendor</span></div></button>`;
+    }
+    html += vendors.map(v => {
+      const on = d.vendor && v.name.toLowerCase() === d.vendor.toLowerCase();
+      return `
+        <button class="sheet-row${on ? ' on' : ''}" onclick="pickVendor(this.dataset.v)" data-v="${esc(v.name)}">
+          <span class="ic40 ${on ? 'ic-white' : 'ic-blue'}" style="font-size:12px;font-weight:600">${esc(initials(v.name))}</span>
+          <div class="pr-text"><span class="sr-name">${esc(v.name)}</span><span class="pr-place">${plural(v.count, 'purchase')} · last ${fmtDate(v.last)}</span></div>
+          <span class="sr-end-txt${on ? ' on' : v.due > 0 ? ' due' : ''}">${on ? 'Selected' : v.due > 0 ? fmt(v.due) + ' due' : 'No balance'}</span>
+        </button>`;
+    }).join('');
+    list.innerHTML = html || `<div class="sheet-empty">No vendors yet — type a name above and tap “Add”.</div>`;
+  } else if (sh.kind === 'p-branch') {
+    list.innerHTML = state.branches.filter(b => !q || `${b.name} ${b.place || ''}`.toLowerCase().includes(q)).map(b => {
+      const on = b.id === d.branchId;
+      return `<div class="sheet-row-wrap">
+        <button class="sheet-row${on ? ' on' : ''}" onclick="pickReceiveBranch('${b.id}')">
+          <span class="ic40 ${on ? 'ic-white' : b.main ? 'ic-orange' : 'ic-soft'}">${ic('store')}</span>
+          <div class="pr-text"><span class="sr-name">${esc(b.name)}${b.main ? '<span class="main-badge">MAIN</span>' : ''}</span><span class="pr-place">${ic('pin', 11)}${esc(b.place || '—')} · ${branchUnits(b.id).toLocaleString()} units</span></div>
+          <span class="sr-end-txt${on ? ' on' : ''}">${on ? 'Selected' : ''}</span>
+        </button>${b.main ? '' : `<button class="row-del" onclick="askDeleteBranch('${b.id}')" aria-label="Delete ${esc(b.name)}" title="Delete branch">${ic('trash', 14)}</button>`}</div>`;
+    }).join('') + `
+      <button class="sheet-row" onclick="openSheet('addBranch', 'receive')"><span class="ic40 ic-soft">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add branch</span><span class="pr-place">Create a new location</span></div></button>`;
+  } else if (sh.kind === 'p-product') {
+    const br = branchById(d.branchId);
+    let html = '';
+    if (typed && !state.products.some(p => (p.name || '').trim().toLowerCase() === typed.toLowerCase())) {
+      html += `<button class="sheet-row" onclick="addNewPurchaseProduct(this.dataset.v)" data-v="${esc(typed)}"><span class="ic40 ic-orange">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add “${esc(typed)}”</span><span class="pr-place">New product — created when you save</span></div></button>`;
+    }
+    html += state.products.filter(p => !q || (p.name || '').toLowerCase().includes(q)).map(p => {
+      const inCart = d.cart.some(l => l.productId === p.id);
+      return `
+        <button class="sheet-row" onclick="addPurchaseLine('${p.id}')">
+          <span class="ini">${esc(initials(p.name))}</span>
+          <div class="pr-text"><span class="sr-name">${esc(p.name)}</span><span class="pr-place">${p.costPrice != null ? 'Cost SAR ' + fmtNum(p.costPrice) + ' · ' : ''}${stockAt(p, d.branchId)} in stock at ${esc(shortBranch(br.name))}</span></div>
+          <span class="sr-end-txt${inCart ? ' on' : ''}">${inCart ? 'Added' : ''}</span>
+        </button>`;
+    }).join('');
+    list.innerHTML = html || `<div class="sheet-empty">${state.products.length ? 'No product matches — type the full name to add it' : 'No products yet — type a name above to add your first one'}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DELETE — sales, purchases, transfers, branches (stock is put back correctly)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function confirmDelete({ title, name, note, action }) {
+  showModal(`
+    <div class="modal-title"><span class="ic ic-red">${ic('trash')}</span>${esc(title)}</div>
+    <div class="danger-box">${esc(name)}</div>
+    <p class="modal-note">${note}</p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="btn-confirm-delete" onclick="${action}">${ic('trash', 15)}Yes, delete</button>
+    </div>`);
+}
+
+function askDeleteSale(id) {
+  const s = state.sales.find(x => x.id === id); if (!s) return;
+  confirmDelete({ title: 'Delete sale', name: `${saleInvoiceNo(s)} · ${s.customerName || 'Walk-in customer'} · ${fmt(saleTotal(s))}`,
+    note: `The ${plural((s.items || []).reduce((a, it) => a + it.quantity, 0), 'unit')} in this sale go back into stock at ${esc(s.branchName || 'Main branch')}. This can't be undone.`,
+    action: `deleteSale('${id}')` });
+}
+
+async function deleteSale(id) {
+  const s = state.sales.find(x => x.id === id); if (!s) return closeModal();
+  const branch = s.branchId || MAIN_BRANCH, inc = firebase.firestore.FieldValue.increment;
+  const batch = db.batch();
+  batch.delete(userSalesCol().doc(id));
+  (s.items || []).forEach(it => {
+    if (!state.products.some(p => p.id === it.productId)) return;
+    batch.update(userProductsCol().doc(it.productId), { quantity: inc(it.quantity), [`stock.${branch}`]: inc(it.quantity) });
+  });
+  try { await batch.commit(); delete state.expandedSales[id]; closeModal(); showToast('Sale deleted · stock returned'); }
+  catch (e) { console.error(e); showToast('Failed to delete sale', 'error'); }
+}
+
+function askDeletePurchase(id) {
+  const p = state.purchases.find(x => x.id === id); if (!p) return;
+  const units = (p.items || []).reduce((a, it) => a + it.quantity, 0);
+  closeSheet();
+  confirmDelete({ title: 'Delete purchase', name: `${purchaseType(p) === 'quick' ? (p.shop || 'Quick buy') : (p.poNo || 'PO') + ' · ' + (p.supplierName || '')} · ${fmt(purchaseTotal(p))}`,
+    note: units ? `The ${plural(units, 'unit')} it added are taken back out of stock at ${esc(p.branchName || 'Main branch')}. This can't be undone.` : `This only removes the record — it didn't add stock. This can't be undone.`,
+    action: `deletePurchase('${id}')` });
+}
+
+async function deletePurchase(id) {
+  const p = state.purchases.find(x => x.id === id); if (!p) return closeModal();
+  const branch = p.branchId || MAIN_BRANCH, inc = firebase.firestore.FieldValue.increment;
+  const batch = db.batch();
+  batch.delete(userPurchasesCol().doc(id));
+  if (p.hasReceipt) batch.delete(userCol('receipts').doc(id));
+  (p.items || []).forEach(it => {
+    if (!state.products.some(x => x.id === it.productId)) return;
+    batch.update(userProductsCol().doc(it.productId), { quantity: inc(-it.quantity), [`stock.${branch}`]: inc(-it.quantity) });
+  });
+  try { await batch.commit(); closeModal(); showToast('Purchase deleted'); }
+  catch (e) { console.error(e); showToast('Failed to delete purchase', 'error'); }
+}
+
+function askDeleteTransfer(id) {
+  const tr = state.transfers.find(x => x.id === id); if (!tr) return;
+  const received = tr.status === 'received';
+  closeSheet();
+  confirmDelete({ title: 'Delete transfer', name: `${tr.transferNo || 'Transfer'} · ${shortBranch(tr.fromName)} → ${shortBranch(tr.toName)}`,
+    note: received ? `The ${plural(tr.units || 0, 'unit')} move back from ${esc(tr.toName)} to ${esc(tr.fromName)}. This can't be undone.`
+                   : `The ${plural(tr.units || 0, 'unit')} in transit go back to ${esc(tr.fromName)}. This can't be undone.`,
+    action: `deleteTransfer('${id}')` });
+}
+
+async function deleteTransfer(id) {
+  const tr = state.transfers.find(x => x.id === id); if (!tr) return closeModal();
+  const inc = firebase.firestore.FieldValue.increment;
+  const batch = db.batch();
+  batch.delete(userTransfersCol().doc(id));
+  (tr.items || []).forEach(it => {
+    if (!state.products.some(p => p.id === it.productId)) return;
+    const upd = { [`stock.${tr.fromId}`]: inc(it.quantity) };
+    if (tr.status === 'received') upd[`stock.${tr.toId}`] = inc(-it.quantity);
+    else upd.quantity = inc(it.quantity);            // in transit: units weren't counted anywhere
+    batch.update(userProductsCol().doc(it.productId), upd);
+  });
+  try { await batch.commit(); closeModal(); showToast('Transfer deleted · stock moved back'); }
+  catch (e) { console.error(e); showToast('Failed to delete transfer', 'error'); }
+}
+
+function askDeleteBranch(id) {
+  const b = branchById(id); if (!b || b.main) return;
+  const units = branchUnits(id);
+  const moving = state.transfers.some(t => t.status !== 'received' && (t.fromId === id || t.toId === id));
+  closeSheet();
+  if (units > 0 || moving) {
+    showModal(`
+      <div class="modal-title"><span class="ic ic-orange">${ic('store')}</span>Can't delete yet</div>
+      <div class="danger-box" style="background:var(--orange-tint)">${esc(b.name)}</div>
+      <p class="modal-note">${units > 0 ? `It still holds ${plural(units, 'unit')}. Transfer them to another branch first.` : 'A transfer to or from this branch is still in transit. Mark it received first.'}</p>
+      <div class="form-actions"><span></span><button class="btn btn-primary" onclick="closeModal()">OK</button></div>`);
+    return;
+  }
+  confirmDelete({ title: 'Delete branch', name: b.name, note: 'Past sales and transfers keep showing its name. This can\'t be undone.', action: `deleteBranch('${id}')` });
+}
+
+async function deleteBranch(id) {
+  try {
+    await userBranchesCol().doc(id).delete();
+    const d = saleDraft(); if (d.fromId === id) d.fromId = MAIN_BRANCH; if (d.toId === id) d.toId = null;
+    const pd = purchaseDraft(); if (pd.branchId === id) pd.branchId = MAIN_BRANCH;
+    closeModal(); showToast('Branch deleted'); renderCurrentPage();
+  } catch (e) { console.error(e); showToast('Failed to delete branch', 'error'); }
 }

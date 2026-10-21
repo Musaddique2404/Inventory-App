@@ -444,10 +444,17 @@ input[type="checkbox"] { width: 20px; height: 20px; padding: 0; box-shadow: none
 .cl-sub.over { color: var(--red); font-weight: 600; }
 .price-link { border: none; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .price-link.missing { color: var(--orange); font-weight: 600; }
-.stepper { display: flex; align-items: center; gap: 2px; background: var(--chip); border-radius: 12px; padding: 2px; flex-shrink: 0; }
-.stepper button { width: 30px; height: 30px; border: none; border-radius: 10px; background: transparent; color: var(--text-2); cursor: pointer; display: grid; place-items: center; }
-.stepper button:hover { background: var(--surface); }
-.stepper span { min-width: 22px; text-align: center; font-size: 14px; font-weight: 600; }
+/* Typed quantity box (+ remove button) on sale / transfer / purchase lines */
+.qty-edit { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.qty-input {
+  width: 64px; height: 38px; padding: 0 6px; border-radius: 11px; text-align: center;
+  font-size: 16px; font-weight: 600; background: var(--chip);
+}
+.qty-rm {
+  width: 34px; height: 34px; border: none; border-radius: 10px; background: transparent; color: var(--red);
+  display: grid; place-items: center; cursor: pointer;
+}
+.qty-rm:hover { background: var(--red-tint); }
 .add-line-btn {
   height: 42px; border: none; border-radius: 12px; background: var(--orange-tint); color: var(--orange-ink);
   font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -569,9 +576,7 @@ button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-
 .chip-btn.on { background: var(--green-tint); color: var(--green-ink); cursor: default; }
 
 .qty-price { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: end; }
-.stepper.big { height: 44px; padding: 5px; box-sizing: border-box; }
-.stepper.big button { width: 34px; height: 34px; }
-.stepper.big span { min-width: 24px; }
+.qty-big .qty-input { width: 88px; height: 44px; }
 
 .toggle-row {
   display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: none; border-radius: 14px; background: var(--soft-2);
@@ -612,7 +617,6 @@ button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-
 
 .del-btn { align-self: flex-start; margin-top: 6px; }
 .sheet .del-btn { align-self: center; }
-.stepper button.rm { color: var(--red); }
 .sheet-row-wrap { position: relative; flex-shrink: 0; }
 .row-actions { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); display: flex; gap: 6px; }
 .row-actions button { width: 34px; height: 34px; border: none; border-radius: 17px; display: grid; place-items: center; cursor: pointer; }

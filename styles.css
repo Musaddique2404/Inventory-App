@@ -527,7 +527,7 @@ input[type="checkbox"] { width: 20px; height: 20px; padding: 0; box-shadow: none
 .sheet .cart-line .h-amt { flex-shrink: 0; }
 
 /* ══════════════════════ DROPDOWNS, FIELDS & ACCESSIBILITY ══════════════════════ */
-button:focus-visible, a:focus-visible, .br-btn:focus-within, .chip-btn:focus-visible, .sheet-row:focus-visible {
+button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-btn:focus-visible, .sheet-row:focus-visible {
   outline: 2px solid var(--orange); outline-offset: 2px;
 }
 .br-btn.dd { position: relative; }
@@ -610,11 +610,12 @@ button:focus-visible, a:focus-visible, .br-btn:focus-within, .chip-btn:focus-vis
 .sheet .del-btn { align-self: center; }
 .stepper button.rm { color: var(--red); }
 .sheet-row-wrap { position: relative; flex-shrink: 0; }
-.sheet-row-wrap .row-del {
-  position: absolute; right: 10px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border: none; border-radius: 17px;
-  background: var(--red-tint); color: var(--red); display: grid; place-items: center; cursor: pointer;
-}
+.row-actions { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); display: flex; gap: 6px; }
+.row-actions button { width: 34px; height: 34px; border: none; border-radius: 17px; display: grid; place-items: center; cursor: pointer; }
+.row-actions .row-del  { background: var(--red-tint); color: var(--red); }
+.row-actions .row-edit { background: var(--chip); color: var(--text-3); }
 .sheet-row-wrap:has(.row-del) .sheet-row { padding-right: 54px; }
+.sheet-row-wrap:has(.row-edit) .sheet-row { padding-right: 94px; }
 
 /* ══════════════════════ TAB BAR ══════════════════════ */
 .tabbar {

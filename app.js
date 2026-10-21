@@ -60,6 +60,8 @@ let state = {
   _unsubPurchases: null,
   _unsubBranches: null,
   _unsubTransfers: null,
+  _unsubHidden: null,
+  hidden: new Set(),          // "vendor:name" / "customer:name" removed from dropdown lists
   // Branches + transfers
   branches: [],
   transfers: [],
@@ -169,6 +171,7 @@ const ICONS = {
   refund:    'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
   arrowR:    'M5 12h14M13 6l6 6-6 6',
   close:     'M7 7l10 10M17 7L7 17',
+  edit:      'M4 20h4L19 9l-4-4L4 16zM14 6l4 4',
   truck:     'M3 7h11v10H3zM14 10h4l3 3v4h-7M7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
   bag:       'M6 8h12l-1 12H7zM9 8V6a3 3 0 0 1 6 0v2',
   camera:    'M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
@@ -289,6 +292,7 @@ async function handleLogout() {
   if (state._unsubPurchases){ state._unsubPurchases(); state._unsubPurchases = null; }
   if (state._unsubBranches) { state._unsubBranches();  state._unsubBranches  = null; }
   if (state._unsubTransfers){ state._unsubTransfers(); state._unsubTransfers = null; }
+  if (state._unsubHidden)   { state._unsubHidden();    state._unsubHidden    = null; }
   await auth.signOut();
 }
 
@@ -405,6 +409,13 @@ function startFirestoreListeners() {
       renderCurrentPage();
     }, err => console.error('Branches listener error:', err));
 
+  // Names the user removed from the Vendor / Customer dropdowns
+  state._unsubHidden = userCol('hidden')
+    .onSnapshot(snap => {
+      state.hidden = new Set(snap.docs.map(d => d.data().key).filter(Boolean));
+      renderCurrentPage();
+    }, err => console.error('Hidden list listener error:', err));
+
   // Transfers listener — newest first
   state._unsubTransfers = userTransfersCol()
     .orderBy('timestamp', 'desc')
@@ -433,6 +444,8 @@ function stopFirestoreListeners() {
   if (state._unsubPurchases) { state._unsubPurchases(); state._unsubPurchases = null; }
   if (state._unsubBranches)  { state._unsubBranches();  state._unsubBranches  = null; }
   if (state._unsubTransfers) { state._unsubTransfers(); state._unsubTransfers = null; }
+  if (state._unsubHidden)    { state._unsubHidden();    state._unsubHidden    = null; }
+  state.hidden    = new Set();
   state.products  = [];
   state.sales     = [];
   state.purchases = [];
@@ -1393,6 +1406,7 @@ function savePrice(i) {
 }
 
 function pickCustomer(name) {
+  if (name !== 'Walk-in customer') unhideName('customer', name);
   saleDraft().customer = name === 'Walk-in customer' ? '' : name;
   closeSheet();
   renderSales();
@@ -1464,6 +1478,18 @@ function renderSheet() {
         <div class="field"><label>Place <span class="hint">(area, city)</span></label><input type="text" id="branch-place" placeholder="e.g. Olaya St, Riyadh" autocomplete="off"></div>
         <button class="btn btn-primary btn-block cta" onclick="saveBranch()">${ic('check', 16, 2.6)}Save branch</button>
       </div>`;
+  } else if (sh.kind === 'editBranch') {
+    const b = branchById(sh.arg);
+    if (!b) { closeSheet(); return; }
+    title = 'Edit branch';
+    sub = b.main ? 'Rename your main branch' : 'Change the name or place';
+    body = `
+      <div class="sheet-form">
+        <div class="field"><label for="branch-name">Branch name <span class="req">*</span></label><input type="text" id="branch-name" value="${esc(b.name)}" autocomplete="off" onkeydown="if (event.key === 'Enter') saveBranchEdit('${b.id}')"><span class="err-msg" id="err-branch-name"></span></div>
+        <div class="field"><label for="branch-place">Place <span class="hint">(area, city)</span></label><input type="text" id="branch-place" value="${esc(b.place || '')}" autocomplete="off" onkeydown="if (event.key === 'Enter') saveBranchEdit('${b.id}')"></div>
+        <button class="btn btn-primary btn-block cta" onclick="saveBranchEdit('${b.id}')">${ic('check', 16, 2.6)}Save changes</button>
+        ${b.main ? '' : `<button class="btn btn-danger btn-sm del-btn" onclick="askDeleteBranch('${b.id}')">${ic('trash', 14)}Delete branch</button>`}
+      </div>`;
   } else if (sh.kind === 'transfer') {
     const tr = state.transfers.find(x => x.id === sh.arg);
     if (!tr) { closeSheet(); return; }
@@ -1494,6 +1520,7 @@ function renderSheet() {
     </div>`;
   if (search) renderSheetList();
   const first = document.querySelector('#sheet-q, #price-input, #branch-name, #cost-input, #vendor-name');
+  if (first && sh.kind === 'editBranch') { first.focus(); first.select(); return; }
   if (first && !['branch', 'p-branch', 'p-detail', 'transfer'].includes(sh.kind)) first.focus();
 }
 
@@ -1517,7 +1544,7 @@ function renderSheetList() {
             <span class="ic40 ${on ? 'ic-white' : b.main ? 'ic-orange' : 'ic-soft'}">${ic('store')}</span>
             <div class="pr-text"><span class="sr-name">${esc(b.name)}${b.main ? '<span class="main-badge">MAIN</span>' : ''}</span><span class="pr-place">${ic('pin', 11)}${esc(b.place || '—')} · ${branchUnits(b.id).toLocaleString()} units</span></div>
             <span class="sr-end-txt${on ? ' on' : ''}">${on ? 'Selected' : dis ? (sh.arg === 'to' ? 'Sending from' : 'Sending to') : ''}</span>
-          </button>${b.main ? '' : `<button class="row-del" onclick="askDeleteBranch('${b.id}')" aria-label="Delete ${esc(b.name)}" title="Delete branch">${ic('trash', 14)}</button>`}</div>`;
+          </button>${branchRowActions(b)}</div>`;
       }).join('');
     list.innerHTML = (rows || `<div class="sheet-empty">No branch matches “${esc(state.sheetQuery)}”</div>`) + `
       <button class="sheet-row" onclick="openSheet('addBranch', '${sh.arg}')">
@@ -1542,19 +1569,19 @@ function renderSheetList() {
     list.innerHTML = rows || `<div class="sheet-empty">${state.products.length ? `No product matches “${esc(state.sheetQuery)}”` : 'No products yet — add one in Inventory'}</div>`;
   } else if (sh.kind === 'customer') {
     const typed = state.sheetQuery.trim();
-    const recent = [...new Set(state.sales.map(s => s.customerName).filter(n => n && n !== 'Walk-in customer'))].slice(0, 8);
+    const recent = [...new Set(state.sales.map(s => s.customerName).filter(n => n && n !== 'Walk-in customer' && !isHidden('customer', n)))].slice(0, 8);
     const names = ['Walk-in customer', ...recent].filter(n => !q || n.toLowerCase().includes(q));
     const current = d.customer || 'Walk-in customer';
     let html = '';
     if (typed && !names.some(n => n.toLowerCase() === typed.toLowerCase())) {
       html += `<button class="sheet-row" onclick="pickCustomer(this.dataset.name)" data-name="${esc(typed)}"><span class="ic40 ic-orange">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add “${esc(typed)}”</span><span class="pr-place">New customer</span></div></button>`;
     }
-    html += names.map(n => `
+    html += names.map(n => `<div class="sheet-row-wrap">
       <button class="sheet-row${n === current ? ' on' : ''}" onclick="pickCustomer(this.dataset.name)" data-name="${esc(n)}">
         <span class="ic40 ${n === current ? 'ic-white' : 'ic-blue'}">${ic('user')}</span>
         <div class="pr-text"><span class="sr-name">${esc(n)}</span><span class="pr-place">${n === 'Walk-in customer' ? 'No name needed' : 'Recent customer'}</span></div>
         <span class="sr-end-txt${n === current ? ' on' : ''}">${n === current ? 'Selected' : ''}</span>
-      </button>`).join('');
+      </button>${n === 'Walk-in customer' ? '' : `<div class="row-actions"><button class="row-del" onclick="askHideName('customer', this.dataset.name)" data-name="${esc(n)}" aria-label="Delete ${esc(n)}" title="Delete customer">${ic('trash', 14)}</button></div>`}</div>`).join('');
     list.innerHTML = html;
   }
 }
@@ -1604,7 +1631,7 @@ function vendorsList() {
     const d = recordDate(p); if (!v.last || d > v.last) v.last = d;
     map.set(key, v);
   });
-  return [...map.values()].sort((a, b) => (b.last || 0) - (a.last || 0));
+  return [...map.values()].filter(v => !isHidden('vendor', v.name)).sort((a, b) => (b.last || 0) - (a.last || 0));
 }
 function recentShops() {
   return [...new Set(state.purchases.filter(p => purchaseType(p) === 'quick' && p.shop).map(p => p.shop.trim()))].slice(0, 4);
@@ -1857,7 +1884,11 @@ function saveNewVendor() {
   if (!v) { document.getElementById('err-vendor-name').textContent = 'Vendor name is required'; return; }
   pickVendor(v);
 }
-function pickVendor(name) { purchaseDraft().vendor = String(name || '').trim(); closeSheet(); renderPurchases(); }
+function pickVendor(name) {
+  const v = String(name || '').trim();
+  unhideName('vendor', v);
+  purchaseDraft().vendor = v; closeSheet(); renderPurchases();
+}
 function pickReceiveBranch(id) { purchaseDraft().branchId = id; closeSheet(); renderPurchases(); }
 function saveCost(i) {
   const d = purchaseDraft(); const l = d.cart[i];
@@ -2088,12 +2119,12 @@ function renderPurchaseSheetList(sh, list, q) {
     }
     html += vendors.map(v => {
       const on = d.vendor && v.name.toLowerCase() === d.vendor.toLowerCase();
-      return `
+      return `<div class="sheet-row-wrap">
         <button class="sheet-row${on ? ' on' : ''}" onclick="pickVendor(this.dataset.v)" data-v="${esc(v.name)}">
           <span class="ic40 ${on ? 'ic-white' : 'ic-blue'}" style="font-size:12px;font-weight:600">${esc(initials(v.name))}</span>
           <div class="pr-text"><span class="sr-name">${esc(v.name)}</span><span class="pr-place">${plural(v.count, 'purchase')} · last ${fmtDate(v.last)}</span></div>
           <span class="sr-end-txt${on ? ' on' : v.due > 0 ? ' due' : ''}">${on ? 'Selected' : v.due > 0 ? fmt(v.due) + ' due' : 'No balance'}</span>
-        </button>`;
+        </button><div class="row-actions"><button class="row-del" onclick="askHideName('vendor', this.dataset.v)" data-v="${esc(v.name)}" aria-label="Delete ${esc(v.name)}" title="Delete vendor">${ic('trash', 14)}</button></div></div>`;
     }).join('');
     list.innerHTML = html || `<div class="sheet-empty">No vendors yet — type a name above and tap “Add”.</div>`;
   } else if (sh.kind === 'p-branch') {
@@ -2104,7 +2135,7 @@ function renderPurchaseSheetList(sh, list, q) {
           <span class="ic40 ${on ? 'ic-white' : b.main ? 'ic-orange' : 'ic-soft'}">${ic('store')}</span>
           <div class="pr-text"><span class="sr-name">${esc(b.name)}${b.main ? '<span class="main-badge">MAIN</span>' : ''}</span><span class="pr-place">${ic('pin', 11)}${esc(b.place || '—')} · ${branchUnits(b.id).toLocaleString()} units</span></div>
           <span class="sr-end-txt${on ? ' on' : ''}">${on ? 'Selected' : ''}</span>
-        </button>${b.main ? '' : `<button class="row-del" onclick="askDeleteBranch('${b.id}')" aria-label="Delete ${esc(b.name)}" title="Delete branch">${ic('trash', 14)}</button>`}</div>`;
+        </button>${branchRowActions(b)}</div>`;
     }).join('') + `
       <button class="sheet-row" onclick="openSheet('addBranch', 'receive')"><span class="ic40 ic-soft">${ic('plus')}</span><div class="pr-text"><span class="sr-name">Add branch</span><span class="pr-place">Create a new location</span></div></button>`;
   } else if (sh.kind === 'p-product') {
@@ -2211,7 +2242,16 @@ async function deleteTransfer(id) {
 }
 
 function askDeleteBranch(id) {
-  const b = branchById(id); if (!b || b.main) return;
+  const b = branchById(id); if (!b) return;
+  if (b.main) {
+    closeSheet();
+    showModal(`
+      <div class="modal-title"><span class="ic ic-orange">${ic('store')}</span>Main branch</div>
+      <div class="danger-box" style="background:var(--orange-tint)">${esc(b.name)}</div>
+      <p class="modal-note">Your main branch is where new stock goes by default, so it can't be deleted. You can rename it instead.</p>
+      <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="closeModal(); openSheet('editBranch', '${b.id}')">${ic('edit', 15)}Rename</button></div>`);
+    return;
+  }
   const units = branchUnits(id);
   const moving = state.transfers.some(t => t.status !== 'received' && (t.fromId === id || t.toId === id));
   closeSheet();
@@ -2233,4 +2273,56 @@ async function deleteBranch(id) {
     const pd = purchaseDraft(); if (pd.branchId === id) pd.branchId = MAIN_BRANCH;
     closeModal(); showToast('Branch deleted'); renderCurrentPage();
   } catch (e) { console.error(e); showToast('Failed to delete branch', 'error'); }
+}
+
+// ── Branch row buttons (edit + delete) used in every branch dropdown ──
+function branchRowActions(b) {
+  return `<div class="row-actions">
+    <button class="row-edit" onclick="openSheet('editBranch', '${b.id}')" aria-label="Edit ${esc(b.name)}" title="Edit branch">${ic('edit', 14)}</button>
+    <button class="row-del" onclick="askDeleteBranch('${b.id}')" aria-label="Delete ${esc(b.name)}" title="Delete branch">${ic('trash', 14)}</button>
+  </div>`;
+}
+
+async function saveBranchEdit(id) {
+  const name  = document.getElementById('branch-name').value.trim();
+  const place = document.getElementById('branch-place').value.trim();
+  const err   = document.getElementById('err-branch-name');
+  if (!name) { err.textContent = 'Branch name is required'; return; }
+  if (state.branches.some(b => b.id !== id && (b.name || '').toLowerCase() === name.toLowerCase())) { err.textContent = 'Another branch already has this name'; return; }
+  try {
+    await userBranchesCol().doc(id).update({ name, place });
+    closeSheet(); showToast('Branch updated'); renderCurrentPage();
+  } catch (e) { console.error(e); showToast('Failed to update branch', 'error'); }
+}
+
+// ── Removing vendors / customers from the dropdown lists (their records stay) ──
+function nameKey(type, name) { return `${type}:${String(name || '').trim().toLowerCase()}`; }
+function isHidden(type, name) { return state.hidden.has(nameKey(type, name)); }
+function hiddenDocId(key) { return encodeURIComponent(key).slice(0, 700); }
+
+function askHideName(type, name) {
+  closeSheet();
+  const label = type === 'vendor' ? 'vendor' : 'customer';
+  confirmDelete({ title: `Delete ${label}`, name,
+    note: `${name} is removed from the ${label} list. Past ${type === 'vendor' ? 'purchases' : 'sales'} keep their records. If you type this name again later, it comes back.`,
+    action: `hideName('${type}', this.dataset.n)` });
+  const btn = document.getElementById('btn-confirm-delete');
+  if (btn) btn.dataset.n = name;
+}
+
+async function hideName(type, name) {
+  const key = nameKey(type, name);
+  try {
+    await userCol('hidden').doc(hiddenDocId(key)).set({ key, type, name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    if (type === 'vendor' && purchaseDraft().vendor.toLowerCase() === String(name).toLowerCase()) purchaseDraft().vendor = '';
+    if (type === 'customer' && saleDraft().customer.toLowerCase() === String(name).toLowerCase()) saleDraft().customer = '';
+    closeModal(); showToast(`${name} deleted`); renderCurrentPage();
+  } catch (e) { console.error(e); showToast('Failed to delete', 'error'); }
+}
+
+function unhideName(type, name) {
+  const key = nameKey(type, name);
+  if (!state.hidden.has(key)) return;
+  state.hidden.delete(key);
+  userCol('hidden').doc(hiddenDocId(key)).delete().catch(e => console.error(e));
 }

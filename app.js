@@ -365,8 +365,7 @@ function startFirestoreListeners() {
       state.products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       migrateLegacyStock();
       updateSidebarProductCount();
-      renderCurrentPage();
-      showDbLoading(false);
+      scheduleRender(() => showDbLoading(false));   // hide the loader once the page is drawn
     }, err => {
       console.error('Products listener error:', err);
       showToast('Failed to load products', 'error');
@@ -379,7 +378,7 @@ function startFirestoreListeners() {
     .onSnapshot(snap => {
       state.sales = snap.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a, b) => recordDate(b) - recordDate(a) || toDate(b.timestamp) - toDate(a.timestamp));
-      renderCurrentPage();
+      scheduleRender();
     }, err => {
       console.error('Sales listener error:', err);
     });
@@ -389,7 +388,7 @@ function startFirestoreListeners() {
     .orderBy('timestamp', 'desc')
     .onSnapshot(snap => {
       state.purchases = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      renderCurrentPage();
+      scheduleRender();
     }, err => {
       console.error('Purchases listener error:', err);
       showToast('Failed to load purchases', 'error');
@@ -406,14 +405,14 @@ function startFirestoreListeners() {
           createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         }, { merge: true }).catch(e => console.error('Main branch create failed:', e));
       }
-      renderCurrentPage();
+      scheduleRender();
     }, err => console.error('Branches listener error:', err));
 
   // Names the user removed from the Vendor / Customer dropdowns
   state._unsubHidden = userCol('hidden')
     .onSnapshot(snap => {
       state.hidden = new Set(snap.docs.map(d => d.data().key).filter(Boolean));
-      renderCurrentPage();
+      scheduleRender();
     }, err => console.error('Hidden list listener error:', err));
 
   // Transfers listener — newest first
@@ -421,7 +420,7 @@ function startFirestoreListeners() {
     .orderBy('timestamp', 'desc')
     .onSnapshot(snap => {
       state.transfers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      renderCurrentPage();
+      scheduleRender();
     }, err => console.error('Transfers listener error:', err));
 }
 
@@ -658,6 +657,24 @@ function renderCurrentPage() {
   }
   // Keep an open picker list in sync when data changes in real time
   if (state.sheet && document.getElementById('sheet-list')) renderSheetList();
+}
+
+// Real-time data arrives in bursts (six listeners at sign-in, two snapshots per save).
+// Draw at most once per frame, and don't replay entrance animations on those redraws,
+// so the screen doesn't flicker or jump while data streams in.
+let _renderQueued = false;
+const _afterRender = [];
+function scheduleRender(after) {
+  if (after) _afterRender.push(after);
+  if (_renderQueued) return;
+  _renderQueued = true;
+  requestAnimationFrame(() => {
+    _renderQueued = false;
+    renderCurrentPage();
+    document.querySelectorAll('.page .inline-toast, .page .hist-detail, .page .txn-detail')
+      .forEach(el => { el.style.animation = 'none'; });
+    _afterRender.splice(0).forEach(fn => fn());
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

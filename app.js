@@ -61,7 +61,9 @@ let state = {
   _unsubBranches: null,
   _unsubTransfers: null,
   _unsubHidden: null,
-  hidden: new Set(),          // "vendor:name" / "customer:name" removed from dropdown lists
+  _unsubSettings: null,
+  settings: null,             // filled from users/{uid}/settings/app — see appSettings()
+  hidden: new Set(),         // "vendor:name" / "customer:name" removed from dropdown lists
   // Branches + transfers
   branches: [],
   transfers: [],
@@ -176,6 +178,7 @@ const ICONS = {
   bag:       'M6 8h12l-1 12H7zM9 8V6a3 3 0 0 1 6 0v2',
   camera:    'M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
   note:      'M6 3h9l4 4v14H6zM14 3v5h5M9 12h6M9 16h6',
+  sliders:   'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
 };
 
 function ic(name, size = 16, stroke = 2) {
@@ -293,6 +296,7 @@ async function handleLogout() {
   if (state._unsubBranches) { state._unsubBranches();  state._unsubBranches  = null; }
   if (state._unsubTransfers){ state._unsubTransfers(); state._unsubTransfers = null; }
   if (state._unsubHidden)   { state._unsubHidden();    state._unsubHidden    = null; }
+  if (state._unsubSettings) { state._unsubSettings();  state._unsubSettings  = null; }
   await auth.signOut();
 }
 
@@ -341,6 +345,8 @@ function showAppScreen(user) {
   updateThemeChrome();
   const out = document.getElementById('logout-btn');
   if (out) out.innerHTML = ic('power', 17);
+  const set = document.getElementById('settings-btn');
+  if (set) set.innerHTML = ic('sliders', 17);
   document.querySelectorAll('.tab-ic[data-icon]').forEach(el => { el.innerHTML = ic(el.dataset.icon, 19); });
 
   // Tab buttons (re-bind once per sign-in)
@@ -408,6 +414,13 @@ function startFirestoreListeners() {
       scheduleRender();
     }, err => console.error('Branches listener error:', err));
 
+  // App settings (VAT on/off and rate) — one document per account
+  state._unsubSettings = userCol('settings').doc('app')
+    .onSnapshot(doc => {
+      state.settings = doc.exists ? doc.data() : null;
+      scheduleRender();
+    }, err => console.error('Settings listener error:', err));
+
   // Names the user removed from the Vendor / Customer dropdowns
   state._unsubHidden = userCol('hidden')
     .onSnapshot(snap => {
@@ -444,6 +457,8 @@ function stopFirestoreListeners() {
   if (state._unsubBranches)  { state._unsubBranches();  state._unsubBranches  = null; }
   if (state._unsubTransfers) { state._unsubTransfers(); state._unsubTransfers = null; }
   if (state._unsubHidden)    { state._unsubHidden();    state._unsubHidden    = null; }
+  if (state._unsubSettings)  { state._unsubSettings();  state._unsubSettings  = null; }
+  state.settings  = null;
   state.hidden    = new Set();
   state.products  = [];
   state.sales     = [];
@@ -1074,7 +1089,77 @@ function confirmDeleteProduct(id) {
 // SALES PAGE — Sell to a customer, or Transfer stock between branches
 // ══════════════════════════════════════════════════════════════════════════════
 
-const VAT = 0.15;
+// ── VAT settings (Settings button in the top bar) ───────────────────────────
+const DEFAULT_SETTINGS = { vatRate: 15, vatSales: true, vatPurchases: true };
+function appSettings() { return { ...DEFAULT_SETTINGS, ...(state.settings || {}) }; }
+// VAT % to apply right now for 'sales' or 'purchases' (0 when switched off)
+function vatPct(kind) {
+  const s = appSettings();
+  const on = kind === 'sales' ? s.vatSales : s.vatPurchases;
+  const rate = Number(s.vatRate);
+  return on && rate > 0 ? rate : 0;
+}
+function withVat(sub, pct) {
+  const vat = Math.round(sub * pct) / 100;           // pct is a percentage, rounded to halalas
+  return { vat, total: sub + vat, vatPct: pct };
+}
+function pctLabel(n) { return `${Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`; }
+
+function openSettings() {
+  const s = appSettings();
+  const toggle = (key, title, sub) => `
+    <button type="button" class="toggle-row" role="switch" data-key="${key}" aria-checked="${!!s[key]}" onclick="flipSetting(this)">
+      <span class="tr-text"><span class="tr-title">${title}</span><span class="tr-sub">${sub}</span></span>
+      <span class="switch${s[key] ? ' on' : ''}"><span></span></span>
+    </button>`;
+  showModal(`
+    <div class="modal-title"><span class="ic ic-orange">${ic('sliders')}</span>Settings</div>
+    <form id="settings-form" onsubmit="return saveSettings(event)">
+      <div class="form-grid">
+        <span class="form-label" style="margin-bottom:0">VAT</span>
+        ${toggle('vatSales', 'Add VAT to sales', 'Added on top of the sale subtotal')}
+        ${toggle('vatPurchases', 'Add VAT to vendor purchases', 'Added on top of the purchase subtotal')}
+        <div class="field">
+          <label for="vat-rate">VAT rate</label>
+          <div class="sar-field"><span>%</span><input type="number" id="vat-rate" name="vatRate" min="0" max="100" step="0.01" inputmode="decimal" value="${s.vatRate}" required></div>
+        </div>
+        <p class="hint">Changes apply to new sales and purchases. Saved ones keep the VAT they were recorded with.</p>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-settings">Save settings</button>
+        </div>
+      </div>
+    </form>`);
+}
+
+function flipSetting(btn) {
+  const on = btn.getAttribute('aria-checked') !== 'true';
+  btn.setAttribute('aria-checked', String(on));
+  btn.querySelector('.switch').classList.toggle('on', on);
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const form = event.target;
+  const rate = parseFloat(form.elements.vatRate.value);
+  if (isNaN(rate) || rate < 0 || rate > 100) { showToast('Enter a VAT rate between 0 and 100', 'error'); return false; }
+  const on = key => form.querySelector(`[data-key="${key}"]`).getAttribute('aria-checked') === 'true';
+  const next = { vatRate: rate, vatSales: on('vatSales'), vatPurchases: on('vatPurchases') };
+  const btn = document.getElementById('btn-save-settings');
+  if (btn) btn.disabled = true;
+  try {
+    await userCol('settings').doc('app').set({ ...next, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    state.settings = { ...(state.settings || {}), ...next };
+    closeModal();
+    renderCurrentPage();
+    showToast('Settings saved');
+  } catch (e) {
+    console.error(e);
+    if (btn) btn.disabled = false;
+    showToast('Failed to save settings', 'error');
+  }
+  return false;
+}
 const TAG_LABEL = { paid: 'Paid', refunded: 'Refunded', in_transit: 'In transit', received: 'Received' };
 
 function branchById(id) {
@@ -1119,7 +1204,7 @@ function draftTotals() {
     const price = state.salesMode === 'sell' ? Number(l.price) || 0 : Number(p?.price ?? p?.costPrice ?? 0);
     return s + price * l.qty;
   }, 0);
-  return { units, sub, vat: sub * VAT, total: sub * (1 + VAT) };
+  return { units, sub, ...withVat(sub, state.salesMode === 'sell' ? vatPct('sales') : 0) };
 }
 
 function saleInvoiceNo(s) {
@@ -1158,14 +1243,10 @@ function renderSales() {
       ? `<button class="price-link${priceSet ? '' : ' missing'}" onclick="openSheet('price', ${i})">${priceSet ? 'SAR ' + fmtNum(l.price) : 'Set price'}</button> · ${av} in stock`
       : `${av} available at ${esc(shortBranch(from.name))}`;
     return `
-      <div class="cart-line">
+      <div class="cart-line" data-line="${i}">
         <span class="ini">${esc(initials(p.name))}</span>
         <div class="cl-text"><span class="cl-name">${esc(p.name)}</span><span class="cl-sub${over ? ' over' : ''}">${sub}</span></div>
-        <div class="stepper">
-          <button onclick="stepLine(${i}, -1)" aria-label="${l.qty === 1 ? 'Remove' : 'Decrease'}" class="${l.qty === 1 ? 'rm' : ''}">${l.qty === 1 ? ic('trash', 13, 2.2) : ic('minus', 13, 2.4)}</button>
-          <span class="num">${l.qty}</span>
-          <button onclick="stepLine(${i}, 1)" aria-label="Increase">${ic('plus', 13, 2.4)}</button>
-        </div>
+        ${qtyBoxHTML(`qty-s-${i}`, l.qty, p.name, `typeSaleQty(${i}, this)`, `fixSaleQty(${i}, this)`, `removeSaleLine(${i})`)}
       </div>`;
   }).join('');
 
@@ -1199,7 +1280,7 @@ function renderSales() {
     </div>`}
 
     <div class="box">
-      <div class="box-head"><span class="box-title">${sell ? 'Items' : 'Products to send'}</span><span class="box-sub">${plural(t.units, 'unit')}</span></div>
+      <div class="box-head"><span class="box-title">${sell ? 'Items' : 'Products to send'}</span><span class="box-sub" data-t="units">${plural(t.units, 'unit')}</span></div>
       ${d.cart.length ? `<div class="cart-lines">${lines}</div>` : ''}
       <button class="add-line-btn" onclick="openSheet('product')">${ic('plus', 14, 2.4)}Add product</button>
     </div>
@@ -1209,17 +1290,12 @@ function renderSales() {
       <span class="box-title">Payment</span>
       <div class="pay3">${PAYMENT_TYPES.map(pt =>
         `<button class="pay3-btn${d.pay === pt.id ? ' active' : ''}" onclick="setSalePay('${pt.id}')">${ic(PAY_IC[pt.id], 18, 1.9)}${pt.label}</button>`).join('')}</div>
-      <div class="totals">
-        <div class="tl"><span>Subtotal</span><span class="num">SAR ${fmtNum(t.sub)}</span></div>
-        <div class="tl"><span>VAT 15%</span><span class="num">SAR ${fmtNum(t.vat)}</span></div>
-        <div class="lc-div"></div>
-        <div class="tl total"><span>Total</span><span class="num">SAR ${fmtNum(t.total)}</span></div>
-      </div>
+      ${totalsHTML(t)}
       <button class="btn btn-primary btn-block cta" id="btn-complete-sale" onclick="completeSale()" ${state.saleSubmitting ? 'disabled' : ''}>${ic('check', 16, 2.6)}${state.saleSubmitting ? 'Saving…' : 'Complete sale'}</button>
     </div>` : `
     <div class="box">
       <div class="note-field"><span class="pr-label">Note</span><input id="transfer-note" class="note-input" value="${esc(d.note)}" placeholder="e.g. Weekend restock" oninput="saleDraft().note = this.value"></div>
-      <div class="move-sum"><span>${plural(d.cart.length, 'product')} · ${plural(t.units, 'unit')}</span><span class="num">Value SAR ${fmtNum(t.sub)}</span></div>
+      <div class="move-sum"><span data-t="movesum">${plural(d.cart.length, 'product')} · ${plural(t.units, 'unit')}</span><span class="num" data-t="value">Value SAR ${fmtNum(t.sub)}</span></div>
       <button class="btn btn-primary btn-block cta" id="btn-send-transfer" onclick="sendTransfer()" ${state.saleSubmitting ? 'disabled' : ''}>${ic('arrowR', 16, 2.4)}${state.saleSubmitting ? 'Sending…' : 'Send transfer'}</button>
     </div>`}
 
@@ -1279,7 +1355,7 @@ function renderSaleCard(s) {
               <span class="amt">${it.priceAtSale != null ? fmt(it.priceAtSale * it.quantity) : '—'}</span>
             </div>`).join('')}
           <div class="totals">
-            ${vat > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(subtotal)}</span></div><div class="tl"><span>VAT 15%</span><span class="num">${fmt(vat)}</span></div>` : ''}
+            ${vat > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(subtotal)}</span></div><div class="tl"><span>VAT ${pctLabel(s.vatRate ?? 15)}</span><span class="num">${fmt(vat)}</span></div>` : ''}
             <div class="tl total"><span>Total</span><span class="num">${fmt(saleTotal(s))}</span></div>
           </div>
           <button class="btn btn-danger btn-sm del-btn" onclick="askDeleteSale('${s.id}')">${ic('trash', 14)}Delete sale</button>
@@ -1307,12 +1383,64 @@ function swapBranches() {
   renderSales();
 }
 
-function stepLine(i, delta) {
-  const d = saleDraft();
-  const line = d.cart[i];
-  if (!line) return;
-  line.qty = Math.max(0, line.qty + delta);
-  if (line.qty === 0) d.cart.splice(i, 1);
+// ── Typed quantity boxes (sales, transfers, purchases) ──────────────────────
+// Typing updates the numbers in place (no full redraw), so the keyboard stays up.
+function qtyBoxHTML(id, qty, name, onType, onDone, onRemove) {
+  return `
+        <div class="qty-edit">
+          <input class="qty-input num" id="${id}" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off"
+            value="${qty || ''}" placeholder="0" aria-label="Quantity of ${esc(name)}"
+            oninput="${onType}" onblur="${onDone}" onfocus="this.select()" onkeydown="if (event.key === 'Enter') this.blur()">
+          ${onRemove ? `<button class="qty-rm" onclick="${onRemove}" aria-label="Remove ${esc(name)}" title="Remove">${ic('trash', 14, 2.2)}</button>` : ''}
+        </div>`;
+}
+function readQty(el) {
+  const digits = el.value.replace(/\D/g, '').slice(0, 6);
+  if (digits !== el.value) el.value = digits;
+  return digits === '' ? 0 : parseInt(digits, 10);
+}
+function setT(root, key, text) { root.querySelectorAll(`[data-t="${key}"]`).forEach(el => { el.textContent = text; }); }
+function totalsHTML(t) {
+  return `
+      <div class="totals">
+        <div class="tl"><span>Subtotal</span><span class="num" data-t="sub">SAR ${fmtNum(t.sub)}</span></div>
+        ${t.vatPct ? `<div class="tl"><span>VAT ${pctLabel(t.vatPct)}</span><span class="num" data-t="vat">SAR ${fmtNum(t.vat)}</span></div>` : ''}
+        <div class="lc-div"></div>
+        <div class="tl total"><span>Total</span><span class="num" data-t="total">SAR ${fmtNum(t.total)}</span></div>
+      </div>`;
+}
+function refreshTotals(root, t) {
+  setT(root, 'units', plural(t.units, 'unit'));
+  setT(root, 'sub', 'SAR ' + fmtNum(t.sub));
+  setT(root, 'vat', 'SAR ' + fmtNum(t.vat));
+  setT(root, 'total', 'SAR ' + fmtNum(t.total));
+}
+
+function refreshSaleNumbers() {
+  const page = document.getElementById('sales-page'); if (!page) return;
+  const d = saleDraft(), t = draftTotals();
+  refreshTotals(page, t);
+  setT(page, 'movesum', `${plural(d.cart.length, 'product')} · ${plural(t.units, 'unit')}`);
+  setT(page, 'value', `Value SAR ${fmtNum(t.sub)}`);
+  d.cart.forEach((l, i) => {
+    const p = state.products.find(x => x.id === l.productId);
+    const sub = page.querySelector(`[data-line="${i}"] .cl-sub`);
+    if (p && sub) sub.classList.toggle('over', l.qty > stockAt(p, d.fromId));
+  });
+}
+function typeSaleQty(i, el) {
+  const l = saleDraft().cart[i]; if (!l) return;
+  l.qty = readQty(el);
+  refreshSaleNumbers();
+}
+function fixSaleQty(i, el) {
+  const l = saleDraft().cart[i]; if (!l) return;
+  if (!(l.qty >= 1)) l.qty = 1;              // empty or 0 goes back to 1 — use the bin to remove
+  el.value = String(l.qty);
+  refreshSaleNumbers();
+}
+function removeSaleLine(i) {
+  saleDraft().cart.splice(i, 1);
   renderSales();
 }
 
@@ -1341,6 +1469,7 @@ async function completeSale() {
   if (!d.cart.length) { showToast('Add at least one product', 'error'); return; }
   for (const l of d.cart) {
     const p = state.products.find(x => x.id === l.productId);
+    if (!(l.qty >= 1)) { showToast(`Enter a quantity for ${p.name}`, 'error'); document.getElementById(`qty-s-${d.cart.indexOf(l)}`)?.focus(); return; }
     if (l.price === '' || l.price == null || isNaN(l.price) || Number(l.price) < 0) { showToast(`Set a price for ${p.name}`, 'error'); return; }
     if (l.qty > stockAt(p, d.fromId)) { showToast(`Only ${stockAt(p, d.fromId)} ${p.name} in stock at ${branch.name}`, 'error'); return; }
   }
@@ -1358,7 +1487,7 @@ async function completeSale() {
       deliveryNote: (d.deliveryNote || '').trim(),
       branchId: branch.id, branchName: branch.name,
       paymentType: d.pay, vatIncluded: false,
-      subtotal: t.sub, vatAmount: t.vat, total: t.total,
+      subtotal: t.sub, vatAmount: t.vat, vatRate: t.vatPct, total: t.total,
       invoiceNo: 'INV-' + String(state.sales.length + 1).padStart(4, '0'),
       items,
     });
@@ -1382,6 +1511,7 @@ async function sendTransfer() {
   if (!d.cart.length) { showToast('Add at least one product', 'error'); return; }
   for (const l of d.cart) {
     const p = state.products.find(x => x.id === l.productId);
+    if (!(l.qty >= 1)) { showToast(`Enter a quantity for ${p.name}`, 'error'); document.getElementById(`qty-s-${d.cart.indexOf(l)}`)?.focus(); return; }
     if (l.qty > stockAt(p, from.id)) { showToast(`Only ${stockAt(p, from.id)} ${p.name} available at ${from.name}`, 'error'); return; }
   }
   const t = draftTotals();
@@ -1707,7 +1837,7 @@ function poTotals() {
   const d = purchaseDraft();
   const units = d.cart.reduce((s, l) => s + l.qty, 0);
   const sub = d.cart.reduce((s, l) => s + (Number(l.cost) || 0) * l.qty, 0);
-  return { units, sub, vat: sub * VAT, total: sub * (1 + VAT) };
+  return { units, sub, ...withVat(sub, vatPct('purchases')) };
 }
 
 function syncPurchaseDraft() {
@@ -1780,15 +1910,11 @@ function poFormHTML() {
     const name = l.isNew ? l.name : p.name;
     const costSet = l.cost !== '' && l.cost != null && !isNaN(l.cost);
     return `
-      <div class="cart-line">
+      <div class="cart-line" data-line="${i}">
         <span class="ini">${esc(initials(name))}</span>
         <div class="cl-text"><span class="cl-name">${esc(name)}${l.isNew ? ' <span class="tag new">NEW</span>' : ''}</span>
-          <span class="cl-sub"><button class="price-link${costSet ? '' : ' missing'}" onclick="openSheet('p-cost', ${i})" aria-label="Change cost for ${esc(name)}">${costSet ? 'Cost SAR ' + fmtNum(l.cost) : 'Set cost'}</button>${costSet ? ' · SAR ' + fmtNum(Number(l.cost) * l.qty) : ''}</span></div>
-        <div class="stepper">
-          <button onclick="stepPurchaseLine(${i}, -1)" aria-label="${l.qty === 1 ? 'Remove' : 'Decrease'} ${esc(name)}" class="${l.qty === 1 ? 'rm' : ''}">${l.qty === 1 ? ic('trash', 13, 2.2) : ic('minus', 13, 2.4)}</button>
-          <span class="num" aria-live="polite">${l.qty}</span>
-          <button onclick="stepPurchaseLine(${i}, 1)" aria-label="Increase ${esc(name)}">${ic('plus', 13, 2.4)}</button>
-        </div>
+          <span class="cl-sub"><button class="price-link${costSet ? '' : ' missing'}" onclick="openSheet('p-cost', ${i})" aria-label="Change cost for ${esc(name)}">${costSet ? 'Cost SAR ' + fmtNum(l.cost) : 'Set cost'}</button>${costSet ? `<span data-t="linetotal"> · SAR ${fmtNum(Number(l.cost) * l.qty)}</span>` : ''}</span></div>
+        ${qtyBoxHTML(`qty-p-${i}`, l.qty, name, `typePurchaseQty(${i}, this)`, `fixPurchaseQty(${i}, this)`, `removePurchaseLine(${i})`)}
       </div>`;
   }).join('');
 
@@ -1799,7 +1925,7 @@ function poFormHTML() {
     </div>
 
     <div class="box">
-      <div class="box-head"><span class="box-title">Items</span><span class="box-sub">${plural(t.units, 'unit')}</span></div>
+      <div class="box-head"><span class="box-title">Items</span><span class="box-sub" data-t="units">${plural(t.units, 'unit')}</span></div>
       ${d.cart.length ? `<div class="cart-lines">${lines}</div>` : ''}
       <button class="add-line-btn" onclick="openSheet('p-product')">${ic('plus', 14, 2.4)}Add product</button>
     </div>
@@ -1820,12 +1946,7 @@ function poFormHTML() {
         <span class="pr-label">Amount paid now</span>
         <div class="sar-field"><span>SAR</span><input type="number" id="amount-paid" min="0" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(d.amountPaid)}" oninput="purchaseDraft().amountPaid = this.value"></div>
       </div>` : ''}
-      <div class="totals">
-        <div class="tl"><span>Subtotal</span><span class="num">SAR ${fmtNum(t.sub)}</span></div>
-        <div class="tl"><span>VAT 15%</span><span class="num">SAR ${fmtNum(t.vat)}</span></div>
-        <div class="lc-div"></div>
-        <div class="tl total"><span>Total</span><span class="num">SAR ${fmtNum(t.total)}</span></div>
-      </div>
+      ${totalsHTML(t)}
       <button class="btn btn-primary btn-block cta" id="btn-save-po" onclick="savePurchase()" ${state.purchaseSubmitting ? 'disabled' : ''}>${ic('check', 16, 2.6)}${state.purchaseSubmitting ? 'Saving…' : 'Save purchase'}</button>
     </div>`;
 }
@@ -1849,11 +1970,7 @@ function quickFormHTML() {
       <div class="qty-price">
         <div class="note-field">
           <span class="pr-label">Qty</span>
-          <div class="stepper big">
-            <button onclick="stepQuickQty(-1)" aria-label="Decrease quantity">${ic('minus', 13, 2.4)}</button>
-            <span class="num" id="quick-qty">${q.qty}</span>
-            <button onclick="stepQuickQty(1)" aria-label="Increase quantity">${ic('plus', 13, 2.4)}</button>
-          </div>
+          <div class="qty-big">${qtyBoxHTML('quick-qty', q.qty, 'item', 'typeQuickQty(this)', 'fixQuickQty(this)', null)}</div>
         </div>
         <div class="note-field">
           <label class="pr-label" for="quick-price">Price per piece</label>
@@ -1922,10 +2039,28 @@ function isoToDate(iso) { const [y, m, d] = String(iso).split('-').map(Number); 
 function setPurchaseMode(m) { state.purchaseMode = m; state.purchasesToast = ''; renderPurchases(); }
 function setPurchaseDate(v) { if (/^\d{4}-\d{2}-\d{2}$/.test(v) && v <= todayISO()) purchaseDraft().date = v; renderPurchases(); }
 function setPurchaseTerm(t) { purchaseDraft().term = t; renderPurchases(); }
-function stepPurchaseLine(i, delta) {
-  const d = purchaseDraft(); const l = d.cart[i]; if (!l) return;
-  l.qty = Math.max(0, l.qty + delta);
-  if (l.qty === 0) d.cart.splice(i, 1);
+function refreshPurchaseNumbers() {
+  const page = document.getElementById('purchases-page'); if (!page) return;
+  const d = purchaseDraft();
+  refreshTotals(page, poTotals());
+  d.cart.forEach((l, i) => {
+    const el = page.querySelector(`[data-line="${i}"] [data-t="linetotal"]`);
+    if (el) el.textContent = ' · SAR ' + fmtNum((Number(l.cost) || 0) * l.qty);
+  });
+}
+function typePurchaseQty(i, el) {
+  const l = purchaseDraft().cart[i]; if (!l) return;
+  l.qty = readQty(el);
+  refreshPurchaseNumbers();
+}
+function fixPurchaseQty(i, el) {
+  const l = purchaseDraft().cart[i]; if (!l) return;
+  if (!(l.qty >= 1)) l.qty = 1;
+  el.value = String(l.qty);
+  refreshPurchaseNumbers();
+}
+function removePurchaseLine(i) {
+  purchaseDraft().cart.splice(i, 1);
   renderPurchases();
 }
 function addPurchaseLine(productId) {
@@ -1983,7 +2118,18 @@ function pickQuickProduct(id) {
   if (!q.price && p.costPrice != null) q.price = String(p.costPrice);
   renderPurchases();
 }
-function stepQuickQty(delta) { const q = quickDraft(); q.qty = Math.max(1, q.qty + delta); renderPurchases(); }
+function refreshQuickTotal() {
+  const q = quickDraft();
+  const el = document.getElementById('quick-total');
+  if (el) el.textContent = 'SAR ' + fmtNum((Number(q.price) || 0) * q.qty);
+}
+function typeQuickQty(el) { quickDraft().qty = readQty(el); refreshQuickTotal(); }
+function fixQuickQty(el) {
+  const q = quickDraft();
+  if (!(q.qty >= 1)) q.qty = 1;
+  el.value = String(q.qty);
+  refreshQuickTotal();
+}
 function setQuickPrice(v) {
   const q = quickDraft(); q.price = v;
   const el = document.getElementById('quick-total');
@@ -2026,6 +2172,8 @@ async function savePurchase() {
   const br = branchById(d.branchId);
   if (!d.vendor) { showToast('Choose a vendor', 'error'); openSheet('p-vendor'); return; }
   if (!d.cart.length) { showToast('Add at least one product', 'error'); return; }
+  const noQty = d.cart.findIndex(l => !(l.qty >= 1));
+  if (noQty >= 0) { const l = d.cart[noQty]; showToast(`Enter a quantity for ${l.isNew ? l.name : state.products.find(p => p.id === l.productId).name}`, 'error'); document.getElementById(`qty-p-${noQty}`)?.focus(); return; }
   const missing = d.cart.find(l => l.cost === '' || l.cost == null || isNaN(l.cost));
   if (missing) { showToast(`Set the cost for ${missing.isNew ? missing.name : state.products.find(p => p.id === missing.productId).name}`, 'error'); openSheet('p-cost', d.cart.indexOf(missing)); return; }
   const t = poTotals();
@@ -2044,7 +2192,7 @@ async function savePurchase() {
     await recordPurchase({
       type: 'po', supplierName: d.vendor, branchId: br.id, branchName: br.name,
       purchaseDate: d.date, paymentStatus: d.term, amountPaid,
-      subtotal: t.sub, vatAmount: t.vat, total: t.total,
+      subtotal: t.sub, vatAmount: t.vat, vatRate: t.vatPct, total: t.total,
       poNo: 'PO-' + String(poCount + 1).padStart(3, '0'),
       items,
     });
@@ -2063,6 +2211,7 @@ async function saveQuickPurchase() {
   const q = quickDraft();
   const item = q.item.trim(), price = Number(q.price);
   if (!item) { showToast('Enter what you bought', 'error'); document.getElementById('quick-item')?.focus(); return; }
+  if (!(q.qty >= 1)) { showToast('Enter the quantity', 'error'); document.getElementById('quick-qty')?.focus(); return; }
   if (q.price === '' || isNaN(price) || price <= 0) { showToast('Enter the price per piece', 'error'); document.getElementById('quick-price')?.focus(); return; }
   const total = price * q.qty;
   let items = [];
@@ -2162,7 +2311,7 @@ function purchaseSheetSpec(sh) {
           : items.map(it => `<div class="cart-line"><span class="ini">${esc(initials(it.productName))}</span><div class="cl-text"><span class="cl-name">${esc(it.productName)}${it.isNewProduct ? ' <span class="tag new">NEW</span>' : ''}</span><span class="cl-sub">+${it.quantity} × ${fmt(it.unitCost || 0)}</span></div><span class="h-amt num">${fmt((it.unitCost || 0) * it.quantity)}</span></div>`).join('')}
         </div>
         <div class="totals">
-          ${(p.vatAmount || 0) > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(p.subtotal || 0)}</span></div><div class="tl"><span>VAT 15%</span><span class="num">${fmt(p.vatAmount)}</span></div>` : ''}
+          ${(p.vatAmount || 0) > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(p.subtotal || 0)}</span></div><div class="tl"><span>VAT ${pctLabel(p.vatRate ?? 15)}</span><span class="num">${fmt(p.vatAmount)}</span></div>` : ''}
           <div class="tl total"><span>Total</span><span class="num">${fmt(purchaseTotal(p))}</span></div>
           <div class="tl"><span>Status</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
           ${due > 0 ? `<div class="tl"><span>Paid</span><span class="num">${fmt(purchaseTotal(p) - due)}</span></div><div class="tl"><span>Still to pay</span><span class="num" style="color:var(--red);font-weight:600">${fmt(due)}</span></div>` : ''}

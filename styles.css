@@ -590,6 +590,7 @@ button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-
 .switch.on { background: var(--orange); }
 .switch.on span { left: 18px; }
 :root[data-theme="dark"] .switch { background: #3a3b40; }
+:root[data-theme="dark"] .switch.on { background: var(--orange); }
 
 .receipt-btn {
   position: relative; height: 64px; border-radius: 14px; background: var(--soft-2); box-shadow: inset 0 0 0 1.5px var(--field-ring);
@@ -636,6 +637,63 @@ button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-
 .tab-label { font-size: 11px; font-weight: 500; color: var(--muted); }
 .tab-btn.active .tab-ic { background: var(--orange-tint); color: var(--orange); }
 .tab-btn.active .tab-label { color: var(--orange); font-weight: 600; }
+
+/* ══════════════════════ SETTINGS PAGE ══════════════════════ */
+[hidden] { display: none !important; }
+.brand-mark.has-logo { background: var(--surface); overflow: hidden; }
+.brand-mark img, .set-logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.set-head { align-items: center; gap: 12px; }
+.back-btn svg { transform: rotate(90deg); }
+
+/* Profile card at the top */
+.set-hero {
+  display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px; border: none; border-radius: 22px;
+  background: var(--surface); color: var(--text); text-align: left; font: inherit; cursor: pointer; transition: background .15s;
+}
+.set-hero:hover { background: var(--soft-2); }
+.set-logo {
+  width: 64px; height: 64px; border-radius: 20px; background: var(--orange); color: #fff; flex-shrink: 0;
+  display: grid; place-items: center; font-size: 26px; font-weight: 700; overflow: hidden;
+}
+.set-logo.has-logo { background: var(--soft); box-shadow: inset 0 0 0 1px var(--field-ring); }
+.set-logo.big { width: 76px; height: 76px; border-radius: 22px; font-size: 30px; }
+.set-hero-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.set-hero-name { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.set-hero-sub  { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.set-hero-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--orange); }
+
+/* Grouped rows */
+.set-section { display: flex; flex-direction: column; gap: 8px; }
+.set-group-title { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; padding: 6px 6px 0; }
+.set-group { background: var(--surface); border-radius: 22px; overflow: hidden; display: flex; flex-direction: column; }
+.set-row {
+  position: relative; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 64px; padding: 12px 16px;
+  border: none; background: none; color: var(--text); font: inherit; text-align: left;
+}
+button.set-row { cursor: pointer; transition: background .15s; }
+button.set-row:hover { background: var(--soft-2); }
+.set-row + .set-row::before { content: ''; position: absolute; top: 0; left: 64px; right: 16px; height: 1px; background: var(--divider); }
+.set-text  { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.set-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.set-sub   { font-size: 12px; color: var(--muted); }
+.set-val   { font-size: 13px; font-weight: 600; color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.set-chev  { color: var(--muted); flex-shrink: 0; }
+.set-chev svg { transform: rotate(-90deg); }
+.set-row.danger .set-title { color: var(--red); font-weight: 600; }
+.set-seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--chip); flex-shrink: 0; }
+.set-seg button {
+  height: 30px; padding: 0 12px; border: none; border-radius: 9px; background: transparent; color: var(--text-3);
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.set-seg button.on { background: var(--surface); color: var(--orange); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.set-foot { text-align: center; font-size: 12px; line-height: 1.6; color: var(--muted); padding: 8px 12px 0; }
+
+/* Business profile editor */
+.logo-edit { display: flex; align-items: center; gap: 16px; padding: 12px; border-radius: 18px; background: var(--soft-2); }
+.logo-actions { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.logo-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.logo-btns label.btn { cursor: pointer; }
 
 /* ══════════════════════ AUTH ══════════════════════ */
 .auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: calc(var(--safe-t) + 24px) 16px calc(var(--safe-b) + 24px); }

@@ -48,6 +48,9 @@ let state = {
   expandedSales: {},
   expandedProducts: {},
   expandedTransfers: {},
+  expandedReturns: {},
+  hist: null,
+  invBranch: 'all',
   receiptCache: {},
   expandedPurchases: {},
   inventorySearch: '',
@@ -104,7 +107,9 @@ function uid() {
 
 function toDate(ts) {
   if (!ts) return new Date();               // pending server timestamp
-  return ts.toDate ? ts.toDate() : new Date(ts);
+  if (ts.toDate) return ts.toDate();
+  const d = new Date(ts);
+  return isNaN(d) ? new Date() : d;         // anything unreadable counts as "now"
 }
 
 // Today's date as YYYY-MM-DD in the user's local timezone
@@ -182,6 +187,8 @@ const ICONS = {
   note:      'M6 3h9l4 4v14H6zM14 3v5h5M9 12h6M9 16h6',
   share:     'M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M16 6l-4-4-4 4M12 2v13',
   download:  'M12 3v12M7 10l5 5 5-5M4 20h16',
+  clock:     'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+  filter:    'M4 5h16l-6 8v5l-4 2v-7z',
   sliders:   'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
 };
 
@@ -469,6 +476,7 @@ function stopFirestoreListeners() {
   state.branches  = [];
   state.transfers = [];
   state.draft     = null;
+  state.tdraft    = null;
   state.pdraft    = null;
   state.qdraft    = null;
   state.sheet     = null;
@@ -656,10 +664,15 @@ function updateSidebarProductCount() {
 // NAVIGATION
 // ══════════════════════════════════════════════════════════════════════════════
 
+const TAB_FOR_PAGE = { transfer: 'inventory' };
 function navigateTo(page) {
+  if (page === 'sales') state.salesMode = 'sell';
+  if (page === 'transfer') state.salesMode = 'move';
+  if (page !== state.currentPage) { state.salesToast = ''; state.purchasesToast = ''; }
   state.currentPage = page;
+  const tab = TAB_FOR_PAGE[page] || page;
   document.querySelectorAll('.tab-btn').forEach(btn =>
-    btn.classList.toggle('active', btn.dataset.page === page));
+    btn.classList.toggle('active', btn.dataset.page === tab));
   document.querySelectorAll('.page').forEach(p => (p.style.display = 'none'));
   document.getElementById(`${page}-page`).style.display = 'grid';
   window.scrollTo(0, 0);
@@ -673,6 +686,8 @@ function renderCurrentPage() {
     case 'sales':     renderSales();      break;
     case 'purchases': renderPurchases();  break;
     case 'settings':  renderSettings();   break;
+    case 'transfer':  renderSales();      break;
+    case 'history':   renderHistory();    break;
   }
   // Keep an open picker list in sync when data changes in real time
   if (state.sheet && document.getElementById('sheet-list')) renderSheetList();
@@ -939,7 +954,6 @@ function renderDashboard() {
   const outCount   = state.products.filter(p => p.quantity === 0).length;
   const stats      = calculateSaleStats(getFilteredSales());
   const allTimeRev = state.sales.reduce((s, x) => s + saleNetTotal(x), 0);
-  const recent     = state.sales.slice(0, 5);
   const label      = rangeLabel();
   const revText    = fmtNum(stats.totalRevenue);
   const profitText = fmtNum(stats.totalProfit);
@@ -1000,49 +1014,43 @@ function renderDashboard() {
 
     <div class="box">
       <div class="box-head">
-        <div class="box-head-text"><span class="box-title">Recent activity</span><span class="box-sub">Latest ${plural(recent.length, 'transaction')}</span></div>
-        <button class="box-link" onclick="navigateTo('sales')">Sales</button>
+        <div class="box-head-text"><span class="box-title">Recent activity</span><span class="box-sub">Sales, returns, purchases and transfers</span></div>
+        <button class="box-link" onclick="openHistory()">History</button>
       </div>
-      ${recent.length === 0
-        ? `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('bolt', 20)}</span><span class="empty-title">No sales yet</span><span class="empty-text">Your recent transactions will appear here</span></div>`
-        : `<div class="box-list">${recent.map(recentSaleRow).join('')}</div>`}
+      ${recentActivityHTML()}
     </div>`;
-}
-
-function recentSaleRow(s) {
-  const pt = payOf(s);
-  return `
-    <div class="soft-row" role="button" style="cursor:pointer" onclick="openSale('${s.id}')">
-      <span class="ic ic-${PAY_TONE[pt]}">${ic(PAY_IC[pt])}</span>
-      <div class="sr-text"><span class="sr-title">${esc(s.customerName || 'Walk-in customer')}</span><span class="sr-sub">${esc(itemsSummary(s.items))} · ${fmtDate(recordDate(s))}</span></div>
-      <div class="sr-end"><span class="sr-val green">${fmt(saleNetTotal(s))}</span><span class="tag ${saleStatus(s) === 'paid' ? pt : 'out'}">${saleStatus(s) === 'paid' ? PAY_NAME[pt] : TAG_LABEL[saleStatus(s)]}</span></div>
-    </div>`;
-}
-
-function openSale(id) {
-  state.expandedSales[id] = true;
-  state.salesMode = 'sell';
-  navigateTo('sales');
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // INVENTORY RENDERING (search-safe — only the list re-renders while typing)
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ── Shop (branch) view: 'all' or a branch id ──
+function invShop() {
+  const id = state.invBranch || 'all';
+  return id !== 'all' && !state.branches.some(b => b.id === id) ? 'all' : id;
+}
+function qtyIn(p, shop = invShop()) { return shop === 'all' ? (Number(p.quantity) || 0) : stockAt(p, shop); }
+function stockStatus(q) { return q <= 0 ? 'out' : q <= lowStockLevel() ? 'low' : 'ok'; }
+function setInvShop(id) { state.invBranch = id; renderInventory(); }
+
 function renderInventory() {
   const container = document.getElementById('inventory-page');
   if (!container) return;
-  const low = state.products.filter(p => p.quantity > 0 && p.quantity <= lowStockLevel()).length;
-  const out = state.products.filter(p => p.quantity === 0).length;
-  const sub = `${plural(state.products.length, 'product')} · ${low} low · ${out} out of stock`;
+  const shop = invShop();
+  const low = state.products.filter(p => stockStatus(qtyIn(p, shop)) === 'low').length;
+  const out = state.products.filter(p => stockStatus(qtyIn(p, shop)) === 'out').length;
+  const where = shop === 'all' ? '' : ` at ${shortBranch(branchById(shop).name)}`;
+  const sub = `${plural(state.products.length, 'product')} · ${low} low · ${out} out of stock${where}`;
 
   if (!document.getElementById('inventory-list')) {
     container.innerHTML = `
       <div class="page-head"><div class="page-head-text"><span class="page-title">Inventory</span><span class="page-date" id="inventory-sub"></span></div></div>
       <div class="head-actions two">
         <button class="btn btn-primary" onclick="showModal(productFormHTML()); return false;">${ic('plus', 16, 2.4)}Add product</button>
-        <button class="btn btn-soft" onclick="openPurchaseForm(); return false;">${ic('cart')}Purchase stock</button>
+        <button class="btn btn-soft" onclick="navigateTo('transfer'); return false;">${ic('swapH')}Transfer stock</button>
       </div>
+      <div class="shop-bar" id="inventory-shops" role="tablist" aria-label="Shop"></div>
       <div class="search">${ic('search', 17)}<input type="search" id="inventory-search" placeholder="Search products…" autocomplete="off"></div>
       <div class="seg" id="inventory-filter"></div>
       <div class="box">
@@ -1067,15 +1075,39 @@ function renderInventoryTable() {
   if (filterBar) filterBar.innerHTML = [['all', 'All'], ['low', 'Low stock'], ['out', 'Out of stock']]
     .map(([id, t]) => `<button class="seg-btn${filter === id ? ' active' : ''}" onclick="setInventoryFilter('${id}')">${t}</button>`).join('');
 
+  // Shop switcher (only when there's more than one shop)
+  const shop = invShop();
+  const shopBar = document.getElementById('inventory-shops');
+  if (shopBar) {
+    const multi = state.branches.length > 1;
+    shopBar.hidden = !multi;
+    shopBar.innerHTML = !multi ? '' : [{ id: 'all', name: 'All shops' }, ...state.branches].map(b => {
+      const units = b.id === 'all' ? state.products.reduce((a, p) => a + (Number(p.quantity) || 0), 0) : branchUnits(b.id);
+      return `<button class="shop-chip${shop === b.id ? ' active' : ''}" role="tab" aria-selected="${shop === b.id}" onclick="setInvShop('${b.id}')">
+        <span class="shop-name">${b.id === 'all' ? ic('store', 13) : ''}${esc(b.id === 'all' ? b.name : shortBranch(b.name))}</span><span class="shop-units num">${plural(units, 'unit')}</span></button>`;
+    }).join('');
+  }
+
   const term = state.inventorySearch.toLowerCase();
   const filtered = state.products.filter(p => {
     if (!(p.name ?? '').toLowerCase().includes(term)) return false;
-    if (filter === 'low') return p.quantity > 0 && p.quantity <= lowStockLevel();
-    if (filter === 'out') return p.quantity === 0;
+    const st = stockStatus(qtyIn(p, shop));
+    if (filter === 'low') return st === 'low';
+    if (filter === 'out') return st === 'out';
     return true;
   });
   const count = document.getElementById('inventory-count');
-  if (count) count.textContent = filtered.length === state.products.length ? 'Sorted A–Z' : `${filtered.length} of ${state.products.length} shown`;
+  if (count) {
+    if (shop === 'all') count.textContent = filtered.length === state.products.length ? 'Sorted A–Z' : `${filtered.length} of ${state.products.length} shown`;
+    else {
+      const here = state.products.filter(p => qtyIn(p, shop) > 0);
+      const units = here.reduce((a, p) => a + qtyIn(p, shop), 0);
+      const value = here.reduce((a, p) => a + qtyIn(p, shop) * (Number(p.costPrice) || 0), 0);
+      count.textContent = `${branchById(shop).name} · ${plural(here.length, 'product')} in stock · ${plural(units, 'unit')} · ${fmt(value)}`;
+    }
+  }
+  const title = document.querySelector('#inventory-page .box-title');
+  if (title) title.textContent = shop === 'all' ? 'Products' : `Products at ${shortBranch(branchById(shop).name)}`;
 
   if (filtered.length === 0) {
     list.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('box', 20)}</span>
@@ -1084,16 +1116,22 @@ function renderInventoryTable() {
     return;
   }
 
+  const multi = state.branches.length > 1;
   list.innerHTML = filtered.map(p => {
-    const status     = p.quantity === 0 ? 'out' : p.quantity <= lowStockLevel() ? 'low' : 'ok';
-    const statusText = p.quantity === 0 ? 'Out of stock' : p.quantity <= lowStockLevel() ? 'Low stock' : 'In stock';
+    const q          = qtyIn(p, shop);
+    const status     = stockStatus(q);
+    const statusText = { out: 'Out of stock', low: 'Low stock', ok: 'In stock' }[status];
     const open = !!state.expandedProducts[p.id];
+    // Per-shop split under the name: "Main 8 · Malaz 4" (all shops) or "of 12 in all shops" (one shop)
+    const split = !multi ? '' : shop === 'all'
+      ? state.branches.map(b => `${esc(shortBranch(b.name))} ${stockAt(p, b.id)}`).join(' · ')
+      : `${p.quantity} in all shops`;
     return `
       <div class="prod${open ? ' open' : ''}" data-product="${p.id}">
         <button class="prod-top" type="button" onclick="toggleProductExpand('${p.id}')" aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} details">
           <span class="ic ${status === 'ok' ? 'ic-orange' : status === 'low' ? 'ic-orange' : 'ic-red'}">${ic('box')}</span>
-          <div class="sr-text"><span class="sr-title">${esc(p.name)}</span><span class="sr-sub">Buy ${p.costPrice != null ? fmt(p.costPrice) : '—'} · Sell ${p.price != null ? fmt(p.price) : '—'}</span></div>
-          <div class="prod-qty"><b>${p.quantity}</b><span class="tag ${status}">${statusText}</span></div>
+          <div class="sr-text"><span class="sr-title">${esc(p.name)}</span><span class="sr-sub">Buy ${p.costPrice != null ? fmt(p.costPrice) : '—'} · Sell ${p.price != null ? fmt(p.price) : '—'}</span>${split ? `<span class="prod-split">${ic('store', 11)}${split}</span>` : ''}</div>
+          <div class="prod-qty"><b>${q}</b><span class="tag ${status}">${statusText}</span></div>
           <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
         </button>
         ${open ? productDetailHTML(p) : ''}
@@ -1573,12 +1611,13 @@ function dayLabel(iso) {
   return new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-function saleDraft() {
-  if (!state.draft) {
-    state.draft = { customer: '', fromId: MAIN_BRANCH, toId: null, pay: 'cash', date: todayISO(), note: '', deliveryNote: '', cart: [] };
-  }
-  return state.draft;
+function newSaleDraft() {
+  return { customer: '', fromId: MAIN_BRANCH, toId: null, pay: 'cash', date: todayISO(), note: '', deliveryNote: '', cart: [] };
 }
+function sellDraft() { if (!state.draft)  state.draft  = newSaleDraft(); return state.draft; }
+function moveDraft() { if (!state.tdraft) state.tdraft = newSaleDraft(); return state.tdraft; }
+// The draft for the page you're on: Sell (new sale) or Transfer stock
+function saleDraft() { return state.salesMode === 'move' ? moveDraft() : sellDraft(); }
 
 function draftTotals() {
   const d = saleDraft();
@@ -1606,9 +1645,14 @@ function syncDraft() {
   if (!d.toId) d.toId = (state.branches.find(b => b.id !== d.fromId) || {}).id || null;
 }
 
+function salesContainer() { return document.getElementById(state.salesMode === 'move' ? 'transfer-page' : 'sales-page'); }
+
 function renderSales() {
-  const container = document.getElementById('sales-page');
+  const container = salesContainer();
   if (!container) return;
+  // Only one of Sell / Transfer is drawn at a time, so element ids never clash
+  const other = document.getElementById(state.salesMode === 'move' ? 'sales-page' : 'transfer-page');
+  if (other) other.innerHTML = '';
   syncDraft();
   const d    = saleDraft();
   const sell = state.salesMode === 'sell';
@@ -1635,12 +1679,12 @@ function renderSales() {
   }).join('');
 
   withFocusKept(() => { container.innerHTML = `
-    <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Sales</span><span class="page-date">${sell ? 'Sell products to a customer' : 'Move stock between branches'}</span></div></div>
-
-    <div class="mode-seg">
-      ${[['sell', 'Sell', 'cart'], ['move', 'Transfer', 'swapH']].map(([k, label, icon]) =>
-        `<button class="mode-btn${state.salesMode === k ? ' active' : ''}" onclick="setSalesMode('${k}')">${ic(icon, 15)}${label}</button>`).join('')}
-    </div>
+    ${sell ? `
+    <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Sell</span><span class="page-date">New sale to a customer</span></div></div>` : `
+    <div class="page-head set-head">
+      <button class="round-btn back-btn" onclick="navigateTo('inventory')" aria-label="Back to Inventory" title="Back">${ic('chevron', 18, 2.2)}</button>
+      <div class="page-head-text"><span class="page-title">Transfer stock</span><span class="page-date">Move products from one shop to another</span></div>
+    </div>`}
 
     ${sell ? `
     <div class="box move-card">
@@ -1686,36 +1730,38 @@ function renderSales() {
     ${state.salesToast ? `<div class="inline-toast"><span class="it-ic">${ic('check', 13, 3)}</span><span>${esc(state.salesToast)}</span></div>` : ''}
 
     <div class="box">
-      <span class="box-title">${sell ? 'Recent sales' : 'Recent transfers'}</span>
+      <div class="box-head"><span class="box-title">${sell ? 'Recent sales' : 'Recent transfers'}</span>
+        <button class="box-link" onclick="openHistory({ type: '${sell ? 'sale' : 'transfer'}' })">See all</button></div>
       <div class="hist" id="sales-list-container">${sell ? salesHistory() : transfersHistory()}</div>
     </div>`; });
 }
 
 function salesHistory() {
   if (!state.sales.length) return `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('bolt', 20)}</span><span class="empty-title">No sales yet</span><span class="empty-text">Completed sales will appear here</span></div>`;
-  const list = state.sales.slice(0, state.histLimit);
-  return list.map(renderSaleCard).join('') + moreButton(state.sales.length);
+  return state.sales.slice(0, 3).map(renderSaleCard).join('');
 }
 
 function transfersHistory() {
   if (!state.transfers.length) return `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('swapH', 20)}</span><span class="empty-title">No transfers yet</span><span class="empty-text">Stock you move between branches will appear here</span></div>`;
-  return state.transfers.slice(0, state.histLimit).map(tr => {
-    const status = tr.status === 'received' ? 'received' : 'in_transit';
-    const open = !!state.expandedTransfers[tr.id];
-    return `
-      <div class="hist-item${open ? ' open' : ''}">
-        <button class="hist-row" onclick="toggleTransferExpand('${tr.id}')" aria-expanded="${open}">
-          <span class="ic ic-orange">${ic('swapH', 15)}</span>
-          <div class="pr-text"><span class="cl-name">${esc(shortBranch(tr.fromName))} → ${esc(shortBranch(tr.toName))}</span><span class="pr-label">${esc(tr.transferNo || 'TR')} · ${plural(tr.units || 0, 'unit')} · ${whenLabel(toDate(tr.timestamp), tr.timestamp)}</span></div>
-          <div class="sr-end"><span class="h-amt num">${fmt(tr.value || 0)}</span><span class="htag ${status}">${TAG_LABEL[status]}</span></div>
-          <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
-        </button>
-        ${open ? transferDetailHTML(tr) : ''}
-      </div>`;
-  }).join('') + moreButton(state.transfers.length);
+  return state.transfers.slice(0, 3).map(transferCardHTML).join('');
 }
 
-function toggleTransferExpand(id) { state.expandedTransfers[id] = !state.expandedTransfers[id]; renderSales(); }
+function transferCardHTML(tr) {
+  const status = tr.status === 'received' ? 'received' : 'in_transit';
+  const open = !!state.expandedTransfers[tr.id];
+  return `
+    <div class="hist-item${open ? ' open' : ''}">
+      <button class="hist-row" onclick="toggleTransferExpand('${tr.id}')" aria-expanded="${open}">
+        <span class="ic ic-orange">${ic('swapH', 15)}</span>
+        <div class="pr-text"><span class="cl-name">${esc(shortBranch(tr.fromName))} → ${esc(shortBranch(tr.toName))}</span><span class="pr-label">${esc(tr.transferNo || 'TR')} · ${plural(tr.units || 0, 'unit')} · ${whenLabel(toDate(tr.timestamp), tr.timestamp)}</span></div>
+        <div class="sr-end"><span class="h-amt num">${fmt(tr.value || 0)}</span><span class="htag ${status}">${TAG_LABEL[status]}</span></div>
+        <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
+      </button>
+      ${open ? transferDetailHTML(tr) : ''}
+    </div>`;
+}
+
+function toggleTransferExpand(id) { state.expandedTransfers[id] = !state.expandedTransfers[id]; renderCurrentPage(); }
 
 function transferDetailHTML(tr) {
   const received = tr.status === 'received';
@@ -1748,10 +1794,6 @@ function transferDetailHTML(tr) {
         </div>`;
 }
 
-function moreButton(total) {
-  if (total <= state.histLimit) return '';
-  return `<button class="more-btn" onclick="state.histLimit += 15; renderSales()">Show more (${total - state.histLimit})</button>`;
-}
 
 function renderSaleCard(s) {
   const items  = s.items ?? [];
@@ -1935,7 +1977,7 @@ async function confirmReturn() {
     await batch.commit();
     state.ret = null;
     closeModal();
-    flashSalesToast(`Returned ${plural(t.units, 'unit')} · refund ${fmt(t.total)}`);
+    notify(`Returned ${plural(t.units, 'unit')} · refund ${fmt(t.total)}`);
   } catch (e) {
     console.error(e);
     if (btn) { btn.disabled = false; btn.innerHTML = `${ic('check', 16, 2.6)}Confirm return`; }
@@ -1945,14 +1987,14 @@ async function confirmReturn() {
 
 function toggleSaleExpand(id) {
   state.expandedSales[id] = !state.expandedSales[id];
-  renderSales();
+  renderCurrentPage();
 }
 
 // Old dashboard links call these
 function renderSalesList() { renderSales(); }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
-function setSalesMode(mode) { state.salesMode = mode; state.salesToast = ''; state.histLimit = 15; renderSales(); }
+function setSalesMode(mode) { state.salesMode = mode; state.salesToast = ''; renderSales(); }
 function setSalePay(id)     { saleDraft().pay = id; renderSales(); }
 function setSaleDate(v)     { if (/^\d{4}-\d{2}-\d{2}$/.test(v) && v <= todayISO()) saleDraft().date = v; renderSales(); }
 
@@ -1997,7 +2039,7 @@ function refreshTotals(root, t) {
 }
 
 function refreshSaleNumbers() {
-  const page = document.getElementById('sales-page'); if (!page) return;
+  const page = salesContainer(); if (!page) return;
   const d = saleDraft(), t = draftTotals();
   refreshTotals(page, t);
   setT(page, 'movesum', `${plural(d.cart.length, 'product')} · ${plural(t.units, 'unit')}`);
@@ -2035,11 +2077,19 @@ function addLine(productId) {
   renderSales();
 }
 
+// Confirmation that shows on whichever page you're on
+function notify(msg) {
+  if (state.currentPage === 'sales' || state.currentPage === 'transfer') return flashSalesToast(msg);
+  if (state.currentPage === 'purchases') return flashPurchasesToast(msg);
+  showToast(msg);
+  renderCurrentPage();
+}
+
 function flashSalesToast(msg) {
   state.salesToast = msg;
   renderSales();
   clearTimeout(flashSalesToast._t);
-  flashSalesToast._t = setTimeout(() => { state.salesToast = ''; if (state.currentPage === 'sales') renderSales(); }, 3000);
+  flashSalesToast._t = setTimeout(() => { state.salesToast = ''; if (state.currentPage === 'sales' || state.currentPage === 'transfer') renderSales(); }, 3000);
 }
 
 async function completeSale() {
@@ -2143,7 +2193,7 @@ async function receiveTransfer(id) {
   try {
     await batch.commit();
     closeSheet();
-    flashSalesToast(`Received at ${tr.toName} · ${plural(tr.units || 0, 'unit')}`);
+    notify(`Received at ${tr.toName} · ${plural(tr.units || 0, 'unit')}`);
   } catch (e) {
     console.error(e);
     showToast('Failed to mark as received', 'error');
@@ -2436,7 +2486,7 @@ function purchasesPageHTML() {
   syncPurchaseDraft();
   const po = state.purchaseMode !== 'quick';
   return `
-    <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Purchases</span><span class="page-date">${po ? 'Buy stock from a vendor' : 'Record a one-off buy from a shop'}</span></div></div>
+    <div class="page-head" style="padding:4px 4px 2px"><div class="page-head-text"><span class="page-title">Buy</span><span class="page-date">${po ? 'Buy stock from a vendor' : 'Record a one-off buy from a shop'}</span></div></div>
 
     <div class="mode-seg" role="tablist" aria-label="Purchase type">
       ${[['po', 'From vendor', 'truck'], ['quick', 'Quick buy', 'bag']].map(([k, label, icon]) =>
@@ -2448,7 +2498,8 @@ function purchasesPageHTML() {
     ${state.purchasesToast ? `<div class="inline-toast" role="status"><span class="it-ic">${ic('check', 13, 3)}</span><span>${esc(state.purchasesToast)}</span></div>` : ''}
 
     <div class="box">
-      <span class="box-title">Recent purchases</span>
+      <div class="box-head"><span class="box-title">Recent purchases</span>
+        <button class="box-link" onclick="openHistory({ type: 'purchase' })">See all</button></div>
       <div class="hist" id="purchases-list-container">${purchasesHistory()}</div>
     </div>`;
 }
@@ -2580,31 +2631,31 @@ function quickMatchesHTML() {
 
 function purchasesHistory() {
   if (!state.purchases.length) return `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('cart', 20)}</span><span class="empty-title">No purchases yet</span><span class="empty-text">Saved purchases will appear here</span></div>`;
-  const list = state.purchases.slice(0, state.purchaseHistLimit);
-  return list.map(p => {
-    const quick = purchaseType(p) === 'quick';
-    const tag = purchaseTag(p);
-    const units = purchaseUnits(p);
-    const when = whenLabel(recordDate(p), p.timestamp);
-    const meta = quick
-      ? `${esc(p.itemName || 'Item')} × ${p.quantity || units || 1} · ${when}`
-      : `${esc(p.poNo || 'PO')} · ${plural(units, 'unit')} · ${when}`;
-    const open = !!state.expandedPurchases[p.id];
-    return `
-      <div class="hist-item${open ? ' open' : ''}">
-        <button class="hist-row" onclick="togglePurchaseExpand('${p.id}')" aria-expanded="${open}">
-          <span class="ic ${quick ? 'ic-orange' : 'ic-blue'}">${ic(quick ? 'bag' : 'truck', 15)}</span>
-          <div class="pr-text"><span class="cl-name">${esc(quick ? (p.shop || 'Quick buy') : (p.supplierName || 'Unknown vendor'))}</span><span class="pr-label">${meta}</span></div>
-          <div class="sr-end"><span class="h-amt num">${fmt(purchaseTotal(p))}</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
-          <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
-        </button>
-        ${open ? purchaseDetailHTML(p) : ''}
-      </div>`;
-  }).join('') + (state.purchases.length > state.purchaseHistLimit
-    ? `<button class="more-btn" onclick="state.purchaseHistLimit += 15; renderPurchases()">Show more (${state.purchases.length - state.purchaseHistLimit})</button>` : '');
+  return state.purchases.slice(0, 3).map(purchaseCardHTML).join('');
 }
 
-function togglePurchaseExpand(id) { state.expandedPurchases[id] = !state.expandedPurchases[id]; renderPurchases(); }
+function purchaseCardHTML(p) {
+  const quick = purchaseType(p) === 'quick';
+  const tag = purchaseTag(p);
+  const units = purchaseUnits(p);
+  const when = whenLabel(recordDate(p), p.timestamp);
+  const meta = quick
+    ? `${esc(p.itemName || 'Item')} × ${p.quantity || units || 1} · ${when}`
+    : `${esc(p.poNo || 'PO')} · ${plural(units, 'unit')} · ${when}`;
+  const open = !!state.expandedPurchases[p.id];
+  return `
+    <div class="hist-item${open ? ' open' : ''}">
+      <button class="hist-row" onclick="togglePurchaseExpand('${p.id}')" aria-expanded="${open}">
+        <span class="ic ${quick ? 'ic-orange' : 'ic-blue'}">${ic(quick ? 'bag' : 'truck', 15)}</span>
+        <div class="pr-text"><span class="cl-name">${esc(quick ? (p.shop || 'Quick buy') : (p.supplierName || 'Unknown vendor'))}</span><span class="pr-label">${meta}</span></div>
+        <div class="sr-end"><span class="h-amt num">${fmt(purchaseTotal(p))}</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
+        <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
+      </button>
+      ${open ? purchaseDetailHTML(p) : ''}
+    </div>`;
+}
+
+function togglePurchaseExpand(id) { state.expandedPurchases[id] = !state.expandedPurchases[id]; renderCurrentPage(); }
 
 function purchaseDetailHTML(p) {
   const quick = purchaseType(p) === 'quick';
@@ -2864,7 +2915,7 @@ async function markPurchasePaid(id) {
   try {
     await userPurchasesCol().doc(id).update({ paymentStatus: 'paid', amountPaid: purchaseTotal(p), paidAt: firebase.firestore.FieldValue.serverTimestamp() });
     closeSheet();
-    flashPurchasesToast(`Marked as paid · ${p.supplierName || p.shop || 'Purchase'}`);
+    notify(`Marked as paid · ${p.supplierName || p.shop || 'Purchase'}`);
   } catch (e) { console.error(e); showToast('Failed to update payment', 'error'); }
 }
 
@@ -3082,7 +3133,7 @@ function askDeleteBranch(id) {
 async function deleteBranch(id) {
   try {
     await userBranchesCol().doc(id).delete();
-    const d = saleDraft(); if (d.fromId === id) d.fromId = MAIN_BRANCH; if (d.toId === id) d.toId = null;
+    [sellDraft(), moveDraft()].forEach(d => { if (d.fromId === id) d.fromId = MAIN_BRANCH; if (d.toId === id) d.toId = null; });
     const pd = purchaseDraft(); if (pd.branchId === id) pd.branchId = MAIN_BRANCH;
     closeModal(); showToast('Branch deleted'); renderCurrentPage();
   } catch (e) { console.error(e); showToast('Failed to delete branch', 'error'); }
@@ -3128,7 +3179,7 @@ async function hideName(type, name) {
   try {
     await userCol('hidden').doc(hiddenDocId(key)).set({ key, type, name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
     if (type === 'vendor' && purchaseDraft().vendor.toLowerCase() === String(name).toLowerCase()) purchaseDraft().vendor = '';
-    if (type === 'customer' && saleDraft().customer.toLowerCase() === String(name).toLowerCase()) saleDraft().customer = '';
+    if (type === 'customer' && sellDraft().customer.toLowerCase() === String(name).toLowerCase()) sellDraft().customer = '';
     closeModal(); showToast(`${name} deleted`); renderCurrentPage();
   } catch (e) { console.error(e); showToast('Failed to delete', 'error'); }
 }
@@ -3395,6 +3446,9 @@ function pdfString(s) {          // plain ASCII for the PDF's Title field
 
 // Packs page images into a PDF file (one full-page JPEG per page)
 async function pagesToPDF(pages, title) {
+  return jpegsToPDF(await canvasesToJpegs(pages, []), title);
+}
+function jpegsToPDF(jpegs, title) {
   const enc = new TextEncoder();
   const parts = [], offsets = [];
   let size = 0;
@@ -3402,16 +3456,16 @@ async function pagesToPDF(pages, title) {
   const obj = (num, write) => { offsets[num] = size; push(`${num} 0 obj\n`); write(); push('\nendobj\n'); };
 
   push('%PDF-1.4\n'); push(new Uint8Array([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]));
-  const n = pages.length;
+  const n = jpegs.length;
   const pageNum = i => 3 + i * 3, imgNum = i => 4 + i * 3, contentNum = i => 5 + i * 3, infoNum = 3 + n * 3;
   obj(1, () => push('<< /Type /Catalog /Pages 2 0 R >>'));
-  obj(2, () => push(`<< /Type /Pages /Kids [${pages.map((_, i) => `${pageNum(i)} 0 R`).join(' ')}] /Count ${n} >>`));
+  obj(2, () => push(`<< /Type /Pages /Kids [${jpegs.map((_, i) => `${pageNum(i)} 0 R`).join(' ')}] /Count ${n} >>`));
   for (let i = 0; i < n; i++) {
-    const jpeg = new Uint8Array(await (await canvasToJPEG(pages[i])).arrayBuffer());
+    const { bytes, w, h } = jpegs[i];
     obj(pageNum(i), () => push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /XObject << /Im0 ${imgNum(i)} 0 R >> /ProcSet [/PDF /ImageC] >> /Contents ${contentNum(i)} 0 R >>`));
     obj(imgNum(i), () => {
-      push(`<< /Type /XObject /Subtype /Image /Width ${pages[i].width} /Height ${pages[i].height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`);
-      push(jpeg); push('\nendstream');
+      push(`<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`);
+      push(bytes); push('\nendstream');
     });
     const draw = `q\n${PDF_W} 0 0 ${PDF_H} 0 0 cm\n/Im0 Do\nQ`;
     obj(contentNum(i), () => push(`<< /Length ${draw.length} >>\nstream\n${draw}\nendstream`));
@@ -3436,11 +3490,15 @@ function downloadBlob(blob, name) {
 // Share or Download buttons on sales, purchases and transfers
 async function docAction(kind, id, how, btn) {
   if (state.pdfBusy) return;
-  const rec = kind === 'sale' ? state.sales.find(x => x.id === id)
-            : kind === 'purchase' ? state.purchases.find(x => x.id === id)
-            : state.transfers.find(x => x.id === id);
-  if (!rec) return;
-  const spec = kind === 'sale' ? saleDocSpec(rec) : kind === 'purchase' ? purchaseDocSpec(rec) : transferDocSpec(rec);
+  let spec = null;
+  if (kind === 'return') { const f = findReturn(id); if (f) spec = returnDocSpec(f.s, f.r, f.i); }
+  else {
+    const rec = kind === 'sale' ? state.sales.find(x => x.id === id)
+              : kind === 'purchase' ? state.purchases.find(x => x.id === id)
+              : state.transfers.find(x => x.id === id);
+    if (rec) spec = kind === 'sale' ? saleDocSpec(rec) : kind === 'purchase' ? purchaseDocSpec(rec) : transferDocSpec(rec);
+  }
+  if (!spec) return;
   spec.fileName = spec.fileName.replace(/[^\w.\-]+/g, '-');
   state.pdfBusy = true;
   const label = btn ? btn.innerHTML : '';
@@ -3493,4 +3551,651 @@ function downloadPending() {
   const p = state.pendingShare;
   if (p) downloadBlob(p.file, p.file.name);
   state.pendingShare = null; closeModal();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HISTORY — every sale, return, purchase and transfer in one place,
+// with search, filters, a summary and one-PDF statements.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const HIST_TYPES = [['all', 'All'], ['sale', 'Sales'], ['return', 'Returns'], ['purchase', 'Purchases'], ['transfer', 'Transfers']];
+const HIST_RANGES = [['all', 'All time'], ['today', 'Today'], ['week', 'Last 7 days'], ['month', 'This month'], ['custom', 'Custom']];
+const HIST_STATUS = [['all', 'Any status'], ['paid', 'Paid'], ['due', 'Money due'], ['returned', 'Returned'], ['in_transit', 'In transit'], ['received', 'Received']];
+const HIST_PAY = [['all', 'Any payment'], ['cash', 'Cash'], ['card', 'Card'], ['transfer', 'Bank transfer'], ['credit', 'Credit / on account']];
+
+function defaultHist() {
+  return { q: '', type: 'all', range: 'all', from: todayISO(), to: todayISO(), branch: 'all', pay: 'all', status: 'all', party: null, limit: 40 };
+}
+function hist() { if (!state.hist) state.hist = defaultHist(); return state.hist; }
+
+// One flat, newest-first list of everything that happened
+function historyRecords() {
+  const out = [];
+  state.sales.forEach(s => {
+    const party = s.customerName || 'Walk-in customer';
+    const number = saleInvoiceNo(s);
+    const names = (s.items || []).map(it => it.productName).join(' ');
+    const st = saleStatus(s);
+    out.push({ type: 'sale', id: s.id, key: 'sale:' + s.id, rec: s, date: recordDate(s), ts: toDate(s.timestamp),
+      party, partyKind: 'customer', number, amount: saleTotal(s), net: saleNetTotal(s),
+      branches: [s.branchId || MAIN_BRANCH], pay: payOf(s), status: st === 'paid' ? ['paid'] : ['returned', 'paid'],
+      units: (s.items || []).reduce((a, it) => a + (Number(it.quantity) || 0), 0),
+      text: `${party} ${number} ${s.branchName || ''} ${names} ${s.deliveryNote || ''}`.toLowerCase() });
+    saleReturns(s).forEach((r, i) => {
+      out.push({ type: 'return', id: `${s.id}:${r.id || i}`, key: `return:${s.id}:${r.id || i}`, rec: s, ret: r, date: isoToDate(r.date), ts: new Date(r.at || isoToDate(r.date)),
+        party, partyKind: 'customer', number: `${number}-R${i + 1}`, amount: -(Number(r.total) || 0),
+        branches: [s.branchId || MAIN_BRANCH], pay: payOf(s), status: ['returned'],
+        units: (r.items || []).reduce((a, it) => a + (Number(it.quantity) || 0), 0),
+        text: `${party} ${number} return ${(r.items || []).map(it => it.productName).join(' ')} ${r.note || ''}`.toLowerCase() });
+    });
+  });
+  state.purchases.forEach(p => {
+    const quick = purchaseType(p) === 'quick';
+    const party = quick ? (p.shop || 'Quick buy') : (p.supplierName || 'Unknown vendor');
+    const number = quick ? 'Quick buy' : (p.poNo || 'PO');
+    const due = purchaseDue(p);
+    out.push({ type: 'purchase', id: p.id, key: 'purchase:' + p.id, rec: p, date: recordDate(p), ts: toDate(p.timestamp),
+      party, partyKind: quick ? 'shop' : 'vendor', number, amount: purchaseTotal(p), due,
+      branches: [p.branchId || MAIN_BRANCH], pay: quick ? payOf(p) : (due > 0.004 ? 'credit' : 'paid'), status: [due > 0.004 ? 'due' : 'paid'],
+      units: quick ? (Number(p.quantity) || 1) : purchaseUnits(p),
+      text: `${party} ${number} ${p.branchName || ''} ${quick ? (p.itemName || '') : (p.items || []).map(it => it.productName).join(' ')}`.toLowerCase() });
+  });
+  state.transfers.forEach(tr => {
+    const party = `${shortBranch(tr.fromName)} → ${shortBranch(tr.toName)}`;
+    out.push({ type: 'transfer', id: tr.id, key: 'transfer:' + tr.id, rec: tr, date: toDate(tr.timestamp), ts: toDate(tr.timestamp),
+      party, partyKind: 'branch', number: tr.transferNo || 'Transfer', amount: Number(tr.value) || 0,
+      branches: [tr.fromId, tr.toId], pay: '', status: [tr.status === 'received' ? 'received' : 'in_transit'],
+      units: Number(tr.units) || 0,
+      text: `${tr.fromName || ''} ${tr.toName || ''} ${tr.transferNo || ''} ${(tr.items || []).map(it => it.productName).join(' ')} ${tr.note || ''}`.toLowerCase() });
+  });
+  return out.sort((a, b) => b.date - a.date || b.ts - a.ts);
+}
+
+function histRange(h) {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  if (h.range === 'today') return [start, null];
+  if (h.range === 'week') { const s = new Date(start); s.setDate(s.getDate() - 6); return [s, null]; }
+  if (h.range === 'month') return [new Date(start.getFullYear(), start.getMonth(), 1), null];
+  if (h.range === 'custom') {
+    const a = isoToDate(h.from || todayISO()), b = isoToDate(h.to || todayISO());
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    const end = new Date(hi); end.setHours(23, 59, 59, 999);
+    return [lo, end];
+  }
+  return [null, null];
+}
+
+function filteredHistory() {
+  const h = hist();
+  const q = h.q.trim().toLowerCase();
+  const [from, to] = histRange(h);
+  return historyRecords().filter(r => {
+    if (h.type !== 'all' && r.type !== h.type) return false;
+    if (h.party && !(r.partyKind === h.party.kind && r.party.trim().toLowerCase() === h.party.name.trim().toLowerCase())) return false;
+    if (q && !r.text.includes(q)) return false;
+    if (from && r.date < from) return false;
+    if (to && r.date > to) return false;
+    if (h.branch !== 'all' && !r.branches.includes(h.branch)) return false;
+    if (h.pay !== 'all' && r.pay !== h.pay) return false;
+    if (h.status !== 'all' && !r.status.includes(h.status)) return false;
+    return true;
+  });
+}
+
+// Totals for whatever is shown
+function historySummary(list) {
+  const sum = (type, f) => list.filter(r => r.type === type).reduce((a, r) => a + f(r), 0);
+  const count = type => list.filter(r => r.type === type).length;
+  const sales = sum('sale', r => r.amount), returns = -sum('return', r => r.amount);
+  return {
+    sales: { n: count('sale'), total: sales },
+    returns: { n: count('return'), total: returns },
+    net: sales - returns,
+    purchases: { n: count('purchase'), total: sum('purchase', r => r.amount), due: sum('purchase', r => r.due || 0) },
+    transfers: { n: count('transfer'), units: sum('transfer', r => r.units), value: sum('transfer', r => r.amount) },
+  };
+}
+function summaryStats(sm) {
+  const stats = [];
+  if (sm.sales.n) stats.push({ label: 'Sales', value: fmt(sm.sales.total), sub: plural(sm.sales.n, 'invoice') });
+  if (sm.returns.n) stats.push({ label: 'Returns', value: '−' + fmt(sm.returns.total), sub: plural(sm.returns.n, 'return'), tone: 'red' });
+  if (sm.sales.n || sm.returns.n) stats.push({ label: 'Net sales', value: fmt(sm.net), sub: 'after returns', tone: 'green' });
+  if (sm.purchases.n) stats.push({ label: 'Purchases', value: fmt(sm.purchases.total), sub: plural(sm.purchases.n, 'purchase') });
+  if (sm.purchases.due > 0.004) stats.push({ label: 'Still to pay', value: fmt(sm.purchases.due), sub: 'balance due', tone: 'red' });
+  if (sm.transfers.n) stats.push({ label: 'Transfers', value: plural(sm.transfers.units, 'unit'), sub: `${plural(sm.transfers.n, 'transfer')} · ${fmt(sm.transfers.value)}` });
+  return stats;
+}
+
+// Customers / vendors whose name matches what's typed
+function historyPartySuggestions(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  const map = new Map();
+  historyRecords().forEach(r => {
+    if (r.partyKind !== 'customer' && r.partyKind !== 'vendor' && r.partyKind !== 'shop') return;
+    if (r.type === 'return') return;
+    if (!r.party.toLowerCase().includes(q)) return;
+    const key = r.partyKind + ':' + r.party.trim().toLowerCase();
+    const v = map.get(key) || { kind: r.partyKind, name: r.party.trim(), n: 0 };
+    v.n += 1; map.set(key, v);
+  });
+  return [...map.values()].sort((a, b) => b.n - a.n).slice(0, 6);
+}
+
+function historyTitle(h) {
+  if (h.party) return h.party.kind === 'customer' ? 'Customer statement' : h.party.kind === 'vendor' ? 'Vendor statement' : 'Shop purchases';
+  return { all: 'Activity report', sale: 'Sales report', return: 'Returns report', purchase: 'Purchase report', transfer: 'Transfer report' }[h.type];
+}
+function historyPeriodLabel(h, list) {
+  if (h.range === 'today') return fmtDate(new Date());
+  if (h.range === 'week' || h.range === 'month') { const [a] = histRange(h); return `${fmtDate(a)} – ${fmtDate(new Date())}`; }
+  if (h.range === 'custom') { const [a, b] = histRange(h); return `${fmtDate(a)} – ${fmtDate(b)}`; }
+  if (!list.length) return 'All time';
+  const first = fmtDate(list[list.length - 1].date), last = fmtDate(list[0].date);
+  return first === last ? first : `${first} – ${last}`;
+}
+function historyFilterNotes(h) {
+  const notes = [];
+  if (h.q.trim()) notes.push(`Search: “${h.q.trim()}”`);
+  if (h.branch !== 'all') notes.push(`Shop: ${(branchById(h.branch) || {}).name || '—'}`);
+  if (h.pay !== 'all') notes.push(`Payment: ${HIST_PAY.find(x => x[0] === h.pay)[1]}`);
+  if (h.status !== 'all') notes.push(`Status: ${HIST_STATUS.find(x => x[0] === h.status)[1]}`);
+  return notes;
+}
+
+// ── Page ────────────────────────────────────────────────────────────────────
+function openHistory(opts = {}) {
+  state.hist = Object.assign(defaultHist(), opts);
+  navigateTo('history');
+  const input = document.getElementById('hist-search');
+  if (input) input.value = hist().q;
+  window.scrollTo(0, 0);
+}
+
+// Opens one record from Home: History with that record expanded
+function openRecord(key) {
+  const [type, ...rest] = key.split(':');
+  const id = rest.join(':');
+  if (type === 'sale') state.expandedSales[id] = true;
+  if (type === 'purchase') state.expandedPurchases[id] = true;
+  if (type === 'transfer') state.expandedTransfers[id] = true;
+  if (type === 'return') state.expandedReturns[id] = true;
+  openHistory();
+  const all = filteredHistory();
+  const idx = all.findIndex(r => r.key === key);
+  if (idx >= hist().limit) { hist().limit = idx + 10; renderHistoryBody(); }
+  const el = document.querySelector(`[data-rec="${CSS.escape(key)}"]`);
+  if (el) { el.scrollIntoView({ block: 'center' }); }
+}
+
+function renderHistory() {
+  const c = document.getElementById('history-page');
+  if (!c) return;
+  if (!document.getElementById('hist-search')) {
+    c.innerHTML = `
+      <div class="page-head"><div class="page-head-text"><span class="page-title">History</span><span class="page-date">Sales, returns, purchases and transfers</span></div></div>
+      <div class="hist-search-row">
+        <div class="search">${ic('search', 17)}<input type="search" id="hist-search" placeholder="Search name, invoice or product" autocomplete="off"></div>
+        <button class="round-btn filter-btn" id="hist-filter-btn" onclick="openHistoryFilters()" aria-label="More filters" title="More filters">${ic('filter', 17)}<span class="filter-badge" id="hist-filter-badge" hidden></span></button>
+      </div>
+      <div id="hist-body" class="hist-body"></div>`;
+    const input = document.getElementById('hist-search');
+    input.value = hist().q;
+    input.addEventListener('input', () => { hist().q = input.value; hist().limit = 40; renderHistoryBody(); });
+  }
+  renderHistoryBody();
+}
+
+function renderHistoryBody() {
+  const body = document.getElementById('hist-body');
+  if (!body) return;
+  const h = hist();
+  const list = filteredHistory();
+  const sm = historySummary(list);
+  const stats = summaryStats(sm);
+  const sugg = h.party ? [] : historyPartySuggestions(h.q);
+  const anyHistory = state.sales.length + state.purchases.length + state.transfers.length > 0;
+  const nExtra = ['branch', 'pay', 'status'].filter(k => h[k] !== 'all').length;
+  const badge = document.getElementById('hist-filter-badge');
+  if (badge) { badge.hidden = !nExtra; badge.textContent = nExtra; }
+
+  const kindIcon = k => k === 'customer' ? 'user' : k === 'vendor' ? 'truck' : 'bag';
+  const kindName = k => k === 'customer' ? 'Customer' : k === 'vendor' ? 'Vendor' : 'Shop';
+  const activeChips = [
+    h.party ? `<button class="active-chip" onclick="clearHistParty()">${ic(kindIcon(h.party.kind), 12)}${kindName(h.party.kind)}: <bdi>${esc(h.party.name)}</bdi>${ic('x', 12, 2.4)}</button>` : '',
+    h.branch !== 'all' ? `<button class="active-chip" onclick="setHist('branch', 'all')">${ic('store', 12)}${esc((branchById(h.branch) || {}).name || 'Shop')}${ic('x', 12, 2.4)}</button>` : '',
+    h.pay !== 'all' ? `<button class="active-chip" onclick="setHist('pay', 'all')">${esc(HIST_PAY.find(x => x[0] === h.pay)[1])}${ic('x', 12, 2.4)}</button>` : '',
+    h.status !== 'all' ? `<button class="active-chip" onclick="setHist('status', 'all')">${esc(HIST_STATUS.find(x => x[0] === h.status)[1])}${ic('x', 12, 2.4)}</button>` : '',
+  ].join('');
+
+  // Group the visible records by day
+  const shown = list.slice(0, h.limit);
+  let lastDay = '', rows = '';
+  shown.forEach(r => {
+    const day = fmtDate(r.date);
+    if (day !== lastDay) { rows += `<div class="day-head">${histDayLabel(r.date)}</div>`; lastDay = day; }
+    rows += `<div class="hist-entry" data-rec="${esc(r.key)}">${historyCardHTML(r)}</div>`;
+  });
+
+  body.innerHTML = `
+    ${sugg.length ? `<div class="sugg-row">${sugg.map(s => `
+      <button class="sugg-chip" onclick="pickHistParty(this.dataset.k, this.dataset.n)" data-k="${s.kind}" data-n="${esc(s.name)}">
+        ${ic(kindIcon(s.kind), 13)}<span>${esc(s.name)}</span><small>${kindName(s.kind)} · ${s.n}</small></button>`).join('')}</div>` : ''}
+    ${activeChips ? `<div class="active-row">${activeChips}</div>` : ''}
+    <div class="chip-scroll" role="tablist" aria-label="Type">${HIST_TYPES.map(([k, t]) =>
+      `<button class="hchip${h.type === k ? ' active' : ''}" role="tab" aria-selected="${h.type === k}" onclick="setHist('type', '${k}')">${t}</button>`).join('')}</div>
+    <div class="chip-scroll" role="tablist" aria-label="Date">${HIST_RANGES.map(([k, t]) =>
+      `<button class="hchip small${h.range === k ? ' active' : ''}" role="tab" aria-selected="${h.range === k}" onclick="setHist('range', '${k}')">${t}</button>`).join('')}</div>
+    ${h.range === 'custom' ? `
+    <div class="range-custom">
+      <div class="field"><label for="hist-from">From</label><input type="date" id="hist-from" value="${h.from}" max="${todayISO()}" onchange="setHist('from', this.value)"></div>
+      <div class="field"><label for="hist-to">To</label><input type="date" id="hist-to" value="${h.to}" max="${todayISO()}" onchange="setHist('to', this.value)"></div>
+    </div>` : ''}
+
+    <div class="box hist-summary">
+      <div class="box-head">
+        <div class="box-head-text"><span class="box-title">${esc(h.party ? h.party.name : historyTitle(h))}</span>
+          <span class="box-sub">${plural(list.length, 'record')} · ${esc(historyPeriodLabel(h, list))}</span></div>
+      </div>
+      ${stats.length ? `<div class="stat-grid">${stats.map(s => `
+        <div class="stat"><span class="stat-label">${s.label}</span><span class="stat-val${s.tone ? ' ' + s.tone : ''}">${s.value}</span><span class="stat-sub">${s.sub}</span></div>`).join('')}</div>` : ''}
+      <div class="dd-actions" style="margin-top:2px">
+        <button class="btn btn-soft btn-sm" onclick="askStatement('download', this)" ${list.length ? '' : 'disabled'}>${ic('download', 14)}Download PDF</button>
+        <button class="btn btn-ghost btn-sm" onclick="askStatement('share', this)" ${list.length ? '' : 'disabled'}>${ic('share', 14)}Share</button>
+      </div>
+    </div>
+
+    <div class="box">
+      ${list.length ? `<div class="hist hist-all">${rows}</div>
+        ${list.length > h.limit ? `<button class="more-btn" onclick="hist().limit += 40; renderHistoryBody()">Show more (${list.length - h.limit})</button>` : ''}`
+      : `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('clock', 20)}</span><span class="empty-title">${anyHistory ? 'Nothing matches' : 'No history yet'}</span>
+          <span class="empty-text">${anyHistory ? 'Try a different search, date or filter' : 'Sales, purchases and transfers will appear here'}</span>
+          ${anyHistory ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="resetHistory()">Clear filters</button>` : ''}</div>`}
+    </div>`;
+}
+
+function histDayLabel(d) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const x = new Date(d); x.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - x) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return x.toLocaleDateString('en-US', { weekday: 'long', day: 'numeric', month: 'short', year: x.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+function historyCardHTML(r) {
+  if (r.type === 'sale') return renderSaleCard(r.rec);
+  if (r.type === 'purchase') return purchaseCardHTML(r.rec);
+  if (r.type === 'transfer') return transferCardHTML(r.rec);
+  return returnCardHTML(r);
+}
+
+function setHist(key, value) {
+  const h = hist();
+  h[key] = value;
+  h.limit = 40;
+  renderHistoryBody();
+}
+function pickHistParty(kind, name) {
+  const h = hist();
+  h.party = { kind, name };
+  h.q = '';
+  const input = document.getElementById('hist-search'); if (input) input.value = '';
+  if (h.type === 'transfer') h.type = 'all';
+  h.limit = 40;
+  renderHistoryBody();
+}
+function clearHistParty() { hist().party = null; renderHistoryBody(); }
+function resetHistory() {
+  state.hist = defaultHist();
+  const input = document.getElementById('hist-search'); if (input) input.value = '';
+  renderHistoryBody();
+}
+
+function openHistoryFilters() {
+  const h = hist();
+  const sel = (id, label, opts, value) => `
+    <div class="field"><label for="${id}">${label}</label>
+      <select id="${id}">${opts.map(([k, t]) => `<option value="${esc(k)}"${k === value ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></div>`;
+  const shops = [['all', 'All shops'], ...state.branches.map(b => [b.id, b.name])];
+  showModal(`
+    <div class="modal-title"><span class="ic ic-orange">${ic('filter')}</span>Filters</div>
+    <div class="form-grid">
+      ${sel('hf-branch', 'Shop', shops, h.branch)}
+      ${sel('hf-pay', 'Payment', HIST_PAY, h.pay)}
+      ${sel('hf-status', 'Status', HIST_STATUS, h.status)}
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="applyHistoryFilters(true)">Reset</button>
+        <button class="btn btn-primary" onclick="applyHistoryFilters(false)">Show results</button>
+      </div>
+    </div>`);
+}
+function applyHistoryFilters(reset) {
+  const h = hist();
+  h.branch = reset ? 'all' : document.getElementById('hf-branch').value;
+  h.pay = reset ? 'all' : document.getElementById('hf-pay').value;
+  h.status = reset ? 'all' : document.getElementById('hf-status').value;
+  h.limit = 40;
+  closeModal();
+  renderHistoryBody();
+}
+
+// ── Return entries (each return is its own record in History) ──
+function returnCardHTML(r) {
+  const s = r.rec, ret = r.ret, open = !!state.expandedReturns[r.id];
+  return `
+    <div class="hist-item${open ? ' open' : ''}">
+      <button class="hist-row" onclick="toggleReturnExpand('${r.id}')" aria-expanded="${open}">
+        <span class="ic ic-red">${ic('refund', 15)}</span>
+        <div class="pr-text"><span class="cl-name">${esc(r.party)}</span><span class="pr-label">Return · ${esc(saleInvoiceNo(s))} · ${plural(r.units, 'unit')}</span></div>
+        <div class="sr-end"><span class="h-amt num neg">−${fmt(Number(ret.total) || 0)}</span><span class="htag returned">${ret.type === 'full' ? 'Full return' : 'Partial'}</span></div>
+        <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
+      </button>
+      ${open ? `
+        <div class="hist-detail">
+          <div class="dd-facts">
+            ${fact('Return', esc(r.number))}
+            ${fact('Date', fmtDate(r.date))}
+            ${fact('Customer', esc(r.party))}
+            ${fact('From invoice', esc(saleInvoiceNo(s)))}
+            ${fact('Back in stock at', esc(s.branchName || 'Main branch'))}
+            ${fact('Recorded by', esc(ret.by || 'unknown'))}
+          </div>
+          ${ret.note ? `<div class="sheet-note" style="margin-bottom:8px">${ic('note', 13)} ${esc(ret.note)}</div>` : ''}
+          ${(ret.items || []).map(it => `
+            <div class="line-item">
+              <div class="li-text"><b>${esc(it.productName)}</b><small>${it.quantity} × ${fmt(Number(it.priceAtSale) || 0)}</small></div>
+              <span class="amt">${fmt((Number(it.priceAtSale) || 0) * it.quantity)}</span>
+            </div>`).join('')}
+          <div class="totals">
+            ${(Number(ret.vat) || 0) > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(Number(ret.subtotal) || 0)}</span></div><div class="tl"><span>VAT</span><span class="num">${fmt(Number(ret.vat))}</span></div>` : ''}
+            <div class="tl total"><span>Refund</span><span class="num">${fmt(Number(ret.total) || 0)}</span></div>
+          </div>
+          <div class="dd-actions">
+            <button class="btn btn-soft btn-sm" onclick="openHistory({ q: '${esc(saleInvoiceNo(s))}' })">${ic('doc', 14)}Open invoice</button>
+            <button class="btn btn-ghost btn-sm" onclick="docAction('return', '${r.id}', 'share', this)">${ic('share', 14)}Share</button>
+            <button class="btn btn-ghost btn-sm" onclick="docAction('return', '${r.id}', 'download', this)">${ic('download', 14)}PDF</button>
+          </div>
+        </div>` : ''}
+    </div>`;
+}
+function toggleReturnExpand(id) { state.expandedReturns[id] = !state.expandedReturns[id]; renderCurrentPage(); }
+function findReturn(id) {
+  const [saleId, retId] = String(id).split(':');
+  const s = state.sales.find(x => x.id === saleId);
+  if (!s) return null;
+  const list = saleReturns(s);
+  const i = list.findIndex((r, k) => String(r.id || k) === retId);
+  return i < 0 ? null : { s, r: list[i], i };
+}
+
+// ── Home: latest activity across everything ──
+function recentActivityHTML() {
+  const recent = historyRecords().slice(0, 5);
+  if (!recent.length) return `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('bolt', 20)}</span><span class="empty-title">No activity yet</span><span class="empty-text">Sales, purchases and transfers will appear here</span></div>`;
+  const look = {
+    sale: r => ({ icon: PAY_IC[r.pay] || 'cash', tone: PAY_TONE[r.pay] || 'green', amt: fmt(r.net), cls: 'green', tag: saleStatus(r.rec) === 'paid' ? PAY_NAME[r.pay] : TAG_LABEL[saleStatus(r.rec)], tagCls: saleStatus(r.rec) === 'paid' ? r.pay : 'out' }),
+    return: r => ({ icon: 'refund', tone: 'red', amt: '−' + fmt(-r.amount), cls: 'red', tag: 'Return', tagCls: 'out' }),
+    purchase: r => ({ icon: r.partyKind === 'shop' ? 'bag' : 'truck', tone: 'blue', amt: fmt(r.amount), cls: '', tag: r.due > 0.004 ? 'Due' : 'Purchase', tagCls: r.due > 0.004 ? 'low' : '' }),
+    transfer: r => ({ icon: 'swapH', tone: 'orange', amt: plural(r.units, 'unit'), cls: '', tag: TAG_LABEL[r.status[0]], tagCls: r.status[0] === 'received' ? 'ok' : 'low' }),
+  };
+  return `<div class="box-list">${recent.map(r => {
+    const l = look[r.type](r);
+    const what = r.type === 'sale' ? itemsSummary(r.rec.items) : r.type === 'purchase' ? r.number : r.type === 'return' ? 'Return · ' + saleInvoiceNo(r.rec) : r.number;
+    return `
+    <div class="soft-row" role="button" tabindex="0" style="cursor:pointer" onclick="openRecord('${esc(r.key)}')">
+      <span class="ic ic-${l.tone}">${ic(l.icon)}</span>
+      <div class="sr-text"><span class="sr-title">${esc(r.party)}</span><span class="sr-sub">${esc(what)} · ${fmtDate(r.date)}</span></div>
+      <div class="sr-end"><span class="sr-val ${l.cls}">${l.amt}</span>${l.tag ? `<span class="tag ${l.tagCls}">${esc(l.tag)}</span>` : ''}</div>
+    </div>`; }).join('')}</div>`;
+}
+
+
+// ── Credit note for one return ──────────────────────────────────────────────
+function returnDocSpec(s, r, i) {
+  const b = brand(), inv = saleInvoiceNo(s), no = `${inv}-R${i + 1}`;
+  return {
+    kind: 'Credit note', number: no, date: fmtDate(isoToDate(r.date)),
+    parties: [
+      { label: 'Customer', value: s.customerName || 'Walk-in customer' },
+      { label: 'Original invoice', value: inv, sub: fmtDate(recordDate(s)) },
+      { label: 'Refund', value: r.type === 'full' ? 'Full return' : 'Partial return', sub: s.branchName || 'Main branch' },
+    ],
+    columns: ['Item', 'Qty', 'Unit price', 'Amount'],
+    rows: (r.items || []).map(it => ({ cells: [it.productName || 'Item', String(it.quantity), fmtNum(it.priceAtSale), fmtNum((Number(it.priceAtSale) || 0) * it.quantity)], sub: '' })),
+    totals: [
+      ...((Number(r.vat) || 0) > 0 ? [['Subtotal', fmtNum(r.subtotal)], ['VAT', fmtNum(r.vat)]] : []),
+      ['Refund', fmt(Number(r.total) || 0), true],
+    ],
+    extra: null,
+    note: r.note ? ['Reason', r.note] : null,
+    footer: b.name,
+    fileName: `Credit-note-${no}.pdf`,
+    shareText: `Credit note ${no} from ${b.name} · ${fmt(Number(r.total) || 0)}`,
+  };
+}
+
+function recordDocSpec(r) {
+  if (r.type === 'sale') return saleDocSpec(r.rec);
+  if (r.type === 'purchase') return purchaseDocSpec(r.rec);
+  if (r.type === 'transfer') return transferDocSpec(r.rec);
+  const f = findReturn(r.id);
+  return f ? returnDocSpec(f.s, f.r, f.i) : null;
+}
+
+// ── Statement: everything shown in History as one PDF ──────────────────────
+function askStatement(how) {
+  const list = filteredHistory();
+  if (!list.length) return;
+  const h = hist();
+  showModal(`
+    <div class="modal-title"><span class="ic ic-orange">${ic(how === 'share' ? 'share' : 'download')}</span>${esc(historyTitle(h))}</div>
+    <p class="modal-note">${h.party ? `<bdi>${esc(h.party.name)}</bdi> · ` : ''}${plural(list.length, 'record')} · ${esc(historyPeriodLabel(h, list))}</p>
+    <div class="pick-list">
+      <button class="pick-row" onclick="buildStatement('summary', '${how}')">
+        <span class="ic ic-orange">${ic('doc', 17)}</span>
+        <span class="set-text"><span class="set-title">Summary only</span><span class="set-sub">Totals and one table of every record · short, good for WhatsApp</span></span>
+      </button>
+      <button class="pick-row" onclick="buildStatement('full', '${how}')">
+        <span class="ic ic-blue">${ic('note', 17)}</span>
+        <span class="set-text"><span class="set-title">Summary + every invoice</span><span class="set-sub">Then each record in full, one per page · ${plural(list.length, 'extra page')}</span></span>
+      </button>
+    </div>
+    <div class="stmt-progress" id="stmt-progress" hidden></div>`);
+}
+
+function statementSpec(list) {
+  const h = hist(), b = brand(), sm = historySummary(list);
+  const typeName = { sale: 'Sale', return: 'Return', purchase: 'Purchase', transfer: 'Transfer' };
+  const showParty = !h.party;
+  const rows = [...list].reverse().map(r => {
+    let details = '';
+    if (r.type === 'sale') details = itemsSummary(r.rec.items) + (saleStatus(r.rec) !== 'paid' ? ` · ${TAG_LABEL[saleStatus(r.rec)].toLowerCase()}` : '');
+    if (r.type === 'return') details = (r.ret.items || []).map(it => `${it.quantity} × ${it.productName}`).join(', ') + (r.ret.note ? ` · ${r.ret.note}` : '');
+    if (r.type === 'purchase') details = (purchaseType(r.rec) === 'quick' ? `${r.rec.itemName || 'Item'} × ${r.rec.quantity || 1}` : `${plural(r.units, 'unit')}`) + (r.due > 0.004 ? ` · ${fmt(r.due)} due` : '');
+    if (r.type === 'transfer') details = `${plural(r.units, 'unit')} · ${TAG_LABEL[r.status[0]].toLowerCase()}`;
+    if (showParty && r.type !== 'transfer') details = `${r.party} · ${details}`;
+    if (r.type === 'transfer') details = `${r.party} · ${details}`;
+    const amount = r.type === 'return' ? `− ${fmtNum(-r.amount)}` : fmtNum(r.amount);
+    return { date: fmtDate(r.date), number: r.number, type: typeName[r.type], details, amount, neg: r.type === 'return', muted: r.type === 'transfer' };
+  });
+  const stats = summaryStats(sm).map(s => [s.label, s.value, s.sub]);
+  if (h.party && h.party.kind === 'vendor') {
+    const paid = sm.purchases.total - sm.purchases.due;
+    stats.splice(1, 0, ['Paid', fmt(paid), 'so far']);
+  }
+  const title = historyTitle(h);
+  // Browsers drop non-Latin download names, so the file name uses plain characters only
+  const slug = h.party ? h.party.name.replace(/[^A-Za-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') : '';
+  return {
+    kind: title, number: h.party ? h.party.name : '', period: historyPeriodLabel(h, list),
+    subject: h.party ? { label: h.party.kind === 'customer' ? 'Customer' : h.party.kind === 'vendor' ? 'Vendor' : 'Shop', value: h.party.name } : null,
+    notes: historyFilterNotes(h),
+    stats, rows,
+    footer: `${b.name} · ${plural(list.length, 'record')}`,
+    fileName: `${title.replace(/\s+/g, '-')}${slug ? '-' + slug : ''}-${todayISO()}.pdf`,
+    shareText: `${title}${h.party ? ' — ' + h.party.name : ''} · ${historyPeriodLabel(h, list)}`,
+  };
+}
+
+// Draws the statement (summary box + table) onto A4 canvases
+async function renderStatementPages(st) {
+  try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+  const b = brand();
+  let logo = null;
+  if (b.logo) { try { logo = await loadImage(b.logo); } catch (e) {} }
+  const M = PDF_M, W = PDF_W - 2 * M, BOTTOM = PDF_H - M - 30;
+  const INK = '#16181d', MUTED = '#7b8190', LINE = '#e6e3de', ACCENT = '#e0701a', SOFT = '#f6f4f1', RED = '#c2410c', GREEN = '#15803d';
+  const pages = [];
+  let ctx, y;
+  const font = (size, weight = 400) => `${weight} ${size}px ${PDF_FONT}`;
+  const newPage = () => {
+    const c = document.createElement('canvas');
+    c.width = Math.round(PDF_W * PDF_SCALE); c.height = Math.round(PDF_H * PDF_SCALE);
+    ctx = c.getContext('2d'); ctx.scale(PDF_SCALE, PDF_SCALE);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, PDF_W, PDF_H);
+    pages.push(c); y = M;
+  };
+  const put = (str, x, yy, size, { weight = 400, color = INK, align = 'left', maxW = 0 } = {}) => {
+    ctx.font = font(size, weight); ctx.fillStyle = color; ctx.textAlign = align;
+    let s = String(str ?? '');
+    if (maxW > 0 && ctx.measureText(s).width > maxW) { while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); s += '…'; }
+    ctx.fillText(s, x, yy);
+  };
+  const wrap = (str, size, weight, maxW, maxLines) => {
+    ctx.font = font(size, weight);
+    const lines = []; let line = '';
+    String(str ?? '').split(/\s+/).filter(Boolean).forEach(w => {
+      const t = line ? line + ' ' + w : w;
+      if (!line || ctx.measureText(t).width <= maxW) line = t; else { lines.push(line); line = w; }
+    });
+    if (line) lines.push(line);
+    if (lines.length > maxLines) { lines.length = maxLines; lines[maxLines - 1] += '…'; }
+    return lines.length ? lines : [''];
+  };
+  const rule = (yy, color = LINE, x = M, w = W, h = 0.8) => { ctx.fillStyle = color; ctx.fillRect(x, yy, w, h); };
+
+  newPage();
+  // Header
+  let tx = M;
+  if (logo) {
+    const s = 40;
+    ctx.save(); ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(M, y, s, s, 10); else ctx.rect(M, y, s, s);
+    ctx.clip();
+    const r = Math.max(s / logo.width, s / logo.height);
+    ctx.drawImage(logo, M + (s - logo.width * r) / 2, y + (s - logo.height * r) / 2, logo.width * r, logo.height * r);
+    ctx.restore(); tx = M + s + 12;
+  }
+  const nameW = W * 0.5 - (tx - M);
+  put(b.name, tx, y + (b.tagline ? 17 : 25), 15, { weight: 700, maxW: nameW });
+  if (b.tagline) put(b.tagline, tx, y + 33, 9.5, { color: MUTED, maxW: nameW });
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '1.6px';
+  put(st.kind.toUpperCase(), M + W, y + 13, 13, { weight: 700, align: 'right', color: ACCENT, maxW: W * 0.48 });
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+  put(st.period, M + W, y + 30, 10, { weight: 600, align: 'right', maxW: W * 0.48 });
+  put(`Made ${fmtDate(new Date())}`, M + W, y + 44, 9, { color: MUTED, align: 'right' });
+  y += 62; rule(y); y += 24;
+
+  // Who / filters
+  if (st.subject) {
+    put(st.subject.label.toUpperCase(), M, y, 7.5, { weight: 600, color: MUTED });
+    put(st.subject.value, M, y + 18, 14, { weight: 700, maxW: W });
+    y += 30;
+  }
+  if (st.notes.length) { put(st.notes.join('   ·   '), M, y + 4, 9, { color: MUTED, maxW: W }); y += 18; }
+  y += 6;
+
+  // Summary box
+  if (st.stats.length) {
+    const cols = Math.min(3, st.stats.length), rowsN = Math.ceil(st.stats.length / cols);
+    const cellW = (W - 24) / cols, cellH = 46, boxH = rowsN * cellH + 16;
+    ctx.fillStyle = SOFT;
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(M, y, W, boxH, 12); else ctx.rect(M, y, W, boxH); ctx.fill();
+    st.stats.forEach(([label, value, sub], i) => {
+      const x = M + 12 + (i % cols) * cellW, yy = y + 8 + Math.floor(i / cols) * cellH;
+      put(label.toUpperCase(), x, yy + 13, 7.5, { weight: 600, color: MUTED });
+      const tone = /^−/.test(value) || label === 'Still to pay' ? RED : label === 'Net sales' ? GREEN : INK;
+      put(value, x, yy + 29, 12.5, { weight: 700, color: tone, maxW: cellW - 10 });
+      if (sub) put(sub, x, yy + 41, 8.5, { color: MUTED, maxW: cellW - 10 });
+    });
+    y += boxH + 26;
+  }
+
+  // Table
+  const X = { date: M, num: M + W * 0.15, type: M + W * 0.32, det: M + W * 0.44, amt: M + W };
+  const detW = W * 0.38;
+  const head = () => {
+    [['Date', X.date], ['Number', X.num], ['Type', X.type], ['Details', X.det]].forEach(([t, x]) => put(t.toUpperCase(), x, y, 7.5, { weight: 600, color: MUTED }));
+    put('AMOUNT (SAR)', X.amt, y, 7.5, { weight: 600, color: MUTED, align: 'right' });
+    y += 9; rule(y, INK, M, W, 0.9); y += 18;
+  };
+  head();
+  st.rows.forEach(r => {
+    const lines = wrap(r.details, 9, 400, detW, 3);
+    const h = (lines.length - 1) * 12;
+    if (y + h + 14 > BOTTOM) { newPage(); head(); }
+    put(r.date, X.date, y, 9, { color: '#3a3f4a' });
+    put(r.number, X.num, y, 9, { weight: 600, maxW: W * 0.16 });
+    put(r.type, X.type, y, 9, { color: r.neg ? RED : MUTED, weight: r.neg ? 600 : 400 });
+    lines.forEach((ln, k) => put(ln, X.det, y + k * 12, 9, { color: '#3a3f4a' }));
+    put(r.amount, X.amt, y, 9.5, { align: 'right', weight: 600, color: r.neg ? RED : r.muted ? MUTED : INK });
+    y += h + 9; rule(y); y += 16;
+  });
+
+  pages.forEach((c, i) => {
+    ctx = c.getContext('2d');
+    rule(PDF_H - M - 12);
+    put(st.footer, M, PDF_H - M + 4, 8.5, { color: MUTED, maxW: W * 0.6 });
+    put(`Page ${i + 1} of ${pages.length}`, M + W, PDF_H - M + 4, 8.5, { color: MUTED, align: 'right' });
+  });
+  return pages;
+}
+
+// Canvases → JPEG page images, freeing each canvas straight away (keeps memory low for long statements)
+async function canvasesToJpegs(pages, out) {
+  for (const c of pages) {
+    const bytes = new Uint8Array(await (await canvasToJPEG(c)).arrayBuffer());
+    out.push({ bytes, w: c.width, h: c.height });
+    c.width = 0; c.height = 0;
+  }
+  return out;
+}
+
+async function buildStatement(mode, how) {
+  if (state.pdfBusy) return;
+  const list = filteredHistory();
+  if (!list.length) return;
+  const progress = document.getElementById('stmt-progress');
+  const say = t => { if (progress) { progress.hidden = false; progress.textContent = t; } };
+  document.querySelectorAll('.pick-row').forEach(b => { b.disabled = true; });
+  state.pdfBusy = true;
+  try {
+    const st = statementSpec(list);
+    say('Preparing summary…');
+    const jpegs = await canvasesToJpegs(await renderStatementPages(st), []);
+    if (mode === 'full') {
+      const ordered = [...list].reverse();
+      for (let i = 0; i < ordered.length; i++) {
+        say(`Adding invoice ${i + 1} of ${ordered.length}…`);
+        const spec = recordDocSpec(ordered[i]);
+        if (spec) await canvasesToJpegs(await renderDocPages(spec), jpegs);
+      }
+    }
+    say('Saving PDF…');
+    const blob = await jpegsToPDF(jpegs, `${st.kind} ${st.number}`.trim());
+    const name = st.fileName.replace(/[^\w.\-]+/g, '-');
+    const file = new File([blob], name, { type: 'application/pdf' });
+    state.pdfBusy = false;
+    closeModal();
+    if (how === 'share') await sharePDF(file, { kind: st.kind, number: st.number, shareText: st.shareText });
+    else { downloadBlob(file, name); showToast('PDF downloaded'); }
+  } catch (e) {
+    console.error(e);
+    showToast('Could not create the PDF', 'error');
+    closeModal();
+  } finally {
+    state.pdfBusy = false;
+  }
 }

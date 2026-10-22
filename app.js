@@ -1040,7 +1040,7 @@ function renderInventory() {
   const shop = invShop();
   const low = state.products.filter(p => stockStatus(qtyIn(p, shop)) === 'low').length;
   const out = state.products.filter(p => stockStatus(qtyIn(p, shop)) === 'out').length;
-  const where = shop === 'all' ? '' : ` at ${shortBranch(branchById(shop).name)}`;
+  const where = shop === 'all' ? '' : ` at ${branchById(shop).name}`;
   const sub = `${plural(state.products.length, 'product')} · ${low} low · ${out} out of stock${where}`;
 
   if (!document.getElementById('inventory-list')) {
@@ -1078,14 +1078,16 @@ function renderInventoryTable() {
   // Shop switcher (only when there's more than one shop)
   const shop = invShop();
   const shopBar = document.getElementById('inventory-shops');
+  // Always shown: "All shops", then every shop you've added (by its full name), then "+ Add shop"
   if (shopBar) {
-    const multi = state.branches.length > 1;
-    shopBar.hidden = !multi;
-    shopBar.innerHTML = !multi ? '' : [{ id: 'all', name: 'All shops' }, ...state.branches].map(b => {
+    const shops = state.branches.length ? state.branches : [branchById(MAIN_BRANCH)];
+    shopBar.hidden = false;
+    shopBar.innerHTML = [{ id: 'all', name: 'All shops' }, ...shops].map(b => {
       const units = b.id === 'all' ? state.products.reduce((a, p) => a + (Number(p.quantity) || 0), 0) : branchUnits(b.id);
-      return `<button class="shop-chip${shop === b.id ? ' active' : ''}" role="tab" aria-selected="${shop === b.id}" onclick="setInvShop('${b.id}')">
-        <span class="shop-name">${b.id === 'all' ? ic('store', 13) : ''}${esc(b.id === 'all' ? b.name : shortBranch(b.name))}</span><span class="shop-units num">${plural(units, 'unit')}</span></button>`;
-    }).join('');
+      const items = b.id === 'all' ? state.products.length : state.products.filter(p => stockAt(p, b.id) > 0).length;
+      return `<button class="shop-chip${shop === b.id ? ' active' : ''}" role="tab" aria-selected="${shop === b.id}" onclick="setInvShop('${b.id}')" title="${esc(b.name)}">
+        <span class="shop-name">${b.id === 'all' ? ic('store', 13) : ''}<bdi>${esc(b.name)}</bdi></span><span class="shop-units num">${plural(items, 'product')} · ${plural(units, 'unit')}</span></button>`;
+    }).join('') + `<button class="shop-chip add" onclick="openSheet('addBranch', 'inventory')">${ic('plus', 14, 2.4)}<span class="shop-name">Add shop</span></button>`;
   }
 
   const term = state.inventorySearch.toLowerCase();
@@ -1107,7 +1109,7 @@ function renderInventoryTable() {
     }
   }
   const title = document.querySelector('#inventory-page .box-title');
-  if (title) title.textContent = shop === 'all' ? 'Products' : `Products at ${shortBranch(branchById(shop).name)}`;
+  if (title) title.textContent = shop === 'all' ? 'Products in all shops' : `Products at ${branchById(shop).name}`;
 
   if (filtered.length === 0) {
     list.innerHTML = `<div class="empty-box"><span class="ic ic-white ic-lg">${ic('box', 20)}</span>
@@ -1124,7 +1126,7 @@ function renderInventoryTable() {
     const open = !!state.expandedProducts[p.id];
     // Per-shop split under the name: "Main 8 · Malaz 4" (all shops) or "of 12 in all shops" (one shop)
     const split = !multi ? '' : shop === 'all'
-      ? state.branches.map(b => `${esc(shortBranch(b.name))} ${stockAt(p, b.id)}`).join(' · ')
+      ? state.branches.map(b => `<span class="split-item"><bdi>${esc(b.name)}</bdi> <b>${stockAt(p, b.id)}</b></span>`).join('<span class="split-dot"> · </span>')
       : `${p.quantity} in all shops`;
     return `
       <div class="prod${open ? ' open' : ''}" data-product="${p.id}">
@@ -2212,6 +2214,7 @@ async function saveBranch() {
     const d = saleDraft();
     if (target === 'to') d.toId = ref.id;
     if (target === 'receive') purchaseDraft().branchId = ref.id;
+    if (target === 'inventory') state.invBranch = ref.id;
     closeSheet();
     showToast(`${name} added`);
     renderCurrentPage();

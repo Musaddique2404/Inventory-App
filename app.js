@@ -1032,7 +1032,13 @@ function invShop() {
 }
 function qtyIn(p, shop = invShop()) { return shop === 'all' ? (Number(p.quantity) || 0) : stockAt(p, shop); }
 function stockStatus(q) { return q <= 0 ? 'out' : q <= lowStockLevel() ? 'low' : 'ok'; }
-function setInvShop(id) { state.invBranch = id; renderInventory(); }
+function setInvShop(id) { state.invBranch = id; closeSheet(); renderInventory(); }
+// Products in stock and total units for 'all' or one shop
+function shopCounts(id) {
+  const units = id === 'all' ? state.products.reduce((a, p) => a + (Number(p.quantity) || 0), 0) : branchUnits(id);
+  const items = state.products.filter(p => qtyIn(p, id) > 0).length;
+  return { units, items };
+}
 
 function renderInventory() {
   const container = document.getElementById('inventory-page');
@@ -1078,16 +1084,17 @@ function renderInventoryTable() {
   // Shop switcher (only when there's more than one shop)
   const shop = invShop();
   const shopBar = document.getElementById('inventory-shops');
-  // Always shown: "All shops", then every shop you've added (by its full name), then "+ Add shop"
+  // Shop dropdown: All shops, or one shop you've added
   if (shopBar) {
-    const shops = state.branches.length ? state.branches : [branchById(MAIN_BRANCH)];
+    const c = shopCounts(shop);
+    const b = shop === 'all' ? null : branchById(shop);
     shopBar.hidden = false;
-    shopBar.innerHTML = [{ id: 'all', name: 'All shops' }, ...shops].map(b => {
-      const units = b.id === 'all' ? state.products.reduce((a, p) => a + (Number(p.quantity) || 0), 0) : branchUnits(b.id);
-      const items = b.id === 'all' ? state.products.length : state.products.filter(p => stockAt(p, b.id) > 0).length;
-      return `<button class="shop-chip${shop === b.id ? ' active' : ''}" role="tab" aria-selected="${shop === b.id}" onclick="setInvShop('${b.id}')" title="${esc(b.name)}">
-        <span class="shop-name">${b.id === 'all' ? ic('store', 13) : ''}<bdi>${esc(b.name)}</bdi></span><span class="shop-units num">${plural(items, 'product')} · ${plural(units, 'unit')}</span></button>`;
-    }).join('') + `<button class="shop-chip add" onclick="openSheet('addBranch', 'inventory')">${ic('plus', 14, 2.4)}<span class="shop-name">Add shop</span></button>`;
+    shopBar.innerHTML = ddButton({
+      onclick: "openSheet('inv-shop')", icon: 'store', tone: shop === 'all' ? 'ic-orange' : 'ic-blue', id: 'dd-inv-shop',
+      label: 'Showing stock for',
+      value: shop === 'all' ? 'All shops' : `<bdi>${esc(b.name)}</bdi>`,
+      sub: `${shop === 'all' ? plural(state.branches.length || 1, 'shop') + ' · ' : ''}${plural(c.items, 'product')} · ${plural(c.units, 'unit')}`,
+    });
   }
 
   const term = state.inventorySearch.toLowerCase();
@@ -2275,6 +2282,10 @@ function renderSheet() {
     const spec = purchaseSheetSpec(sh);
     if (!spec) { closeSheet(); return; }
     ({ title, sub } = spec); search = spec.search || ''; body = spec.body || ''; footer = spec.footer || '';
+  } else if (sh.kind === 'inv-shop') {
+    title = 'Show stock for';
+    sub = 'Pick a shop to see everything it holds';
+    search = 'Search shop or area';
   } else if (sh.kind === 'branch') {
     title = sh.arg === 'to' ? 'Send to' : sell ? 'Sell from' : 'Send from';
     sub = 'Choose a branch by name or place';
@@ -2335,7 +2346,7 @@ function renderSheet() {
   if (search) renderSheetList();
   const first = document.querySelector('#sheet-q, #price-input, #branch-name, #cost-input, #vendor-name');
   if (first && sh.kind === 'editBranch') { first.focus(); first.select(); return; }
-  if (first && !['branch', 'p-branch', 'p-detail', 'transfer'].includes(sh.kind)) first.focus();
+  if (first && !['branch', 'p-branch', 'p-detail', 'transfer', 'inv-shop'].includes(sh.kind)) first.focus();
 }
 
 function renderSheetList() {
@@ -2346,6 +2357,26 @@ function renderSheetList() {
   const q = state.sheetQuery.trim().toLowerCase();
 
   if (sh.kind.startsWith('p-')) { renderPurchaseSheetList(sh, list, q); return; }
+  if (sh.kind === 'inv-shop') {
+    const cur = invShop();
+    const row = (id, name, place, main) => {
+      const on = id === cur, c = shopCounts(id);
+      return `<button class="sheet-row${on ? ' on' : ''}" onclick="setInvShop('${id}')">
+          <span class="ic40 ${on ? 'ic-white' : id === 'all' || main ? 'ic-orange' : 'ic-soft'}">${ic('store')}</span>
+          <div class="pr-text"><span class="sr-name"><bdi>${esc(name)}</bdi>${main ? '<span class="main-badge">MAIN</span>' : ''}</span><span class="pr-place">${place ? `${ic('pin', 11)}${esc(place)} · ` : ''}${plural(c.items, 'product')} · ${plural(c.units, 'unit')}</span></div>
+          <span class="sr-end-txt${on ? ' on' : ''}">${on ? 'Showing' : ''}</span>
+        </button>`;
+    };
+    const shops = (state.branches.length ? state.branches : [branchById(MAIN_BRANCH)])
+      .filter(b => !q || `${b.name} ${b.place || ''}`.toLowerCase().includes(q));
+    list.innerHTML = (q ? '' : row('all', 'All shops', '', false))
+      + (shops.map(b => row(b.id, b.name, b.place || '', b.main)).join('') || `<div class="sheet-empty">No shop matches “${esc(state.sheetQuery)}”</div>`)
+      + `<button class="sheet-row" onclick="openSheet('addBranch', 'inventory')">
+          <span class="ic40 ic-soft">${ic('plus')}</span>
+          <div class="pr-text"><span class="sr-name">Add shop</span><span class="pr-place">Create a new location</span></div>
+        </button>`;
+    return;
+  }
   if (sh.kind === 'branch') {
     const cur = sh.arg === 'to' ? d.toId : d.fromId;
     const other = state.salesMode === 'sell' ? null : sh.arg === 'to' ? d.fromId : d.toId;

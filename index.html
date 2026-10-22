@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f4f2ef">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <title>Atheer - Inventory Management System</title>
+  <title>Ateer - Inventory Management System</title>
   <script>
     // Apply the saved theme before first paint
     try { if (localStorage.getItem('ateer-theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -99,7 +99,6 @@
         <div class="brand-text"><span class="brand-owner">Musaddique's</span><span class="brand-name">Ateer</span></div>
         <button class="round-btn" id="settings-btn" title="Settings" aria-label="Settings" onclick="openSettings()"></button>
         <button class="round-btn" id="theme-btn" title="Theme" aria-label="Switch theme" onclick="toggleTheme()"></button>
-        <button class="round-btn" id="logout-btn" title="Sign out" aria-label="Sign out" onclick="handleLogout()"></button>
       </div>
     </header>
 
@@ -113,6 +112,7 @@
       <div id="inventory-page" class="page" style="display:none;"></div>
       <div id="sales-page"     class="page" style="display:none;"></div>
       <div id="purchases-page" class="page" style="display:none;"></div>
+      <div id="settings-page"  class="page" style="display:none;"></div>
     </main>
 
     <nav class="tabbar" aria-label="Main">

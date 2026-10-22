@@ -641,7 +641,7 @@ function showModal(content) {
       </div>
     </div>`;
   const first = document.querySelector('.modal input, .modal button:not(.modal-close)');
-  if (first) first.focus();
+  if (first) { if (typeof KB !== 'undefined') KB.expect(first); first.focus(); }
 }
 
 // Escape closes whatever is open (picker sheet first, then pop-up)
@@ -2361,8 +2361,8 @@ function renderSheet() {
     </div>`;
   if (search) renderSheetList();
   const first = document.querySelector('#sheet-q, #price-input, #branch-name, #cost-input, #vendor-name');
-  if (first && sh.kind === 'editBranch') { first.focus(); first.select(); return; }
-  if (first && !['branch', 'p-branch', 'p-detail', 'transfer', 'inv-shop'].includes(sh.kind)) first.focus();
+  if (first && sh.kind === 'editBranch') { KB.expect(first); first.focus(); first.select(); return; }
+  if (first && !['branch', 'p-branch', 'p-detail', 'transfer', 'inv-shop'].includes(sh.kind)) { KB.expect(first); first.focus(); }
 }
 
 function renderSheetList() {
@@ -4254,41 +4254,71 @@ async function buildStatement(mode, how) {
 // KEYBOARD-AWARE LAYOUT (phones)
 // Tracks the visible area above the on-screen keyboard so pop-ups stay in view,
 // the bottom tab bar steps aside while typing, and the focused box isn't hidden.
+// Everything glides (CSS transitions in styles.css) instead of snapping, and once
+// we've seen the keyboard we remember its height, so a pop-up that opens with the
+// keyboard slides straight into its final place at the same time as the keyboard.
 // ══════════════════════════════════════════════════════════════════════════════
-(function keyboardAware() {
+const KB = (function keyboardAware() {
   const root = document.documentElement;
   const vv = window.visualViewport;
+  const touch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
   const isField = el => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
-    (el.tagName === 'INPUT' && !/^(checkbox|radio|file|button|submit|range|color)$/i.test(el.type)));
+    (el.tagName === 'INPUT' && !/^(checkbox|radio|file|button|submit|range|color|date)$/i.test(el.type)));
   let fullHeight = vv ? vv.height : window.innerHeight;       // tallest the screen gets without a keyboard
-  let raf = 0;
+  let kbHeight = 0;
+  try { kbHeight = Number(localStorage.getItem('ateer-kbh')) || 0; } catch (e) {}
+  let raf = 0, settle = 0, expectUntil = 0;
 
+  function apply(h, top, open) {
+    root.style.setProperty('--vvh', `${Math.round(h)}px`);
+    root.style.setProperty('--vvt', `${Math.round(top)}px`);
+    root.classList.toggle('kb-open', open);
+  }
   function update() {
     raf = 0;
     const h = vv ? vv.height : window.innerHeight;
     const top = vv ? vv.offsetTop : 0;
     const typing = isField(document.activeElement);
-    if (!typing || h > fullHeight) fullHeight = Math.max(h, typing ? fullHeight : h);
+    if (!typing) fullHeight = h; else if (h > fullHeight) fullHeight = h;
     const open = typing && fullHeight - h > 120;                 // keyboard is up
-    root.style.setProperty('--vvh', `${Math.round(h)}px`);
-    root.style.setProperty('--vvt', `${Math.round(top)}px`);
-    root.classList.toggle('kb-open', open);
+    // While a pop-up is waiting for its keyboard, keep the predicted size until the keyboard really arrives
+    if (!open && typing && Date.now() < expectUntil) return;
+    if (open) expectUntil = 0;
+    if (open) {
+      const k = Math.round(fullHeight - h);
+      if (Math.abs(k - kbHeight) > 8) { kbHeight = k; try { localStorage.setItem('ateer-kbh', String(k)); } catch (e) {} }
+    }
+    apply(h, top, open);
   }
   const schedule = () => { if (!raf) raf = requestAnimationFrame(update); };
 
+  // Called just before a pop-up focuses a text box: size it for the keyboard that's about to open
+  function expect(el) {
+    if (!touch || !isField(el) || !kbHeight) return;
+    apply(Math.max(240, fullHeight - kbHeight), 0, true);
+    expectUntil = Date.now() + 900;
+    clearTimeout(settle);
+    settle = setTimeout(() => { expectUntil = 0; schedule(); }, 950);   // then trust the real measurement
+  }
+
+  // Only scroll when the box is actually hidden behind the keyboard or off-screen
+  function reveal(el) {
+    if (!el || document.activeElement !== el) return;
+    const r = el.getBoundingClientRect();
+    const visTop = 8, visBottom = (vv ? vv.height : window.innerHeight) - 12;
+    if (r.top >= visTop && r.bottom <= visBottom) return;
+    el.scrollIntoView({ block: el.closest('.modal, .sheet') ? 'nearest' : 'center', behavior: 'smooth' });
+  }
+
   if (vv) { vv.addEventListener('resize', schedule); vv.addEventListener('scroll', schedule); }
   window.addEventListener('resize', schedule);
-  window.addEventListener('orientationchange', () => { fullHeight = 0; setTimeout(schedule, 300); });
-
-  // Keep the box you're typing in visible (inside pop-ups too) once the keyboard has opened
+  window.addEventListener('orientationchange', () => { fullHeight = 0; kbHeight = 0; setTimeout(schedule, 350); });
   document.addEventListener('focusin', e => {
     if (!isField(e.target)) return;
     schedule();
-    setTimeout(() => {
-      if (document.activeElement !== e.target) return;
-      e.target.scrollIntoView({ block: e.target.closest('.modal, .sheet') ? 'nearest' : 'center', behavior: 'smooth' });
-    }, 320);
+    setTimeout(() => reveal(e.target), 380);                     // after the keyboard has finished rising
   });
   document.addEventListener('focusout', () => setTimeout(schedule, 120));
   update();
+  return { expect, isField };
 })();

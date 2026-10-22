@@ -638,6 +638,58 @@ button:focus-visible, a:focus-visible, .date-dd:has(input:focus-visible), .chip-
 .tab-btn.active .tab-ic { background: var(--orange-tint); color: var(--orange); }
 .tab-btn.active .tab-label { color: var(--orange); font-weight: 600; }
 
+/* ══════════════════════ DROPDOWN DETAILS (inventory, sales, purchases, transfers) ══════════════════════ */
+.dd-chev { color: var(--muted); flex-shrink: 0; display: grid; place-items: center; width: 22px; transition: transform .2s ease; }
+.open > .hist-row .dd-chev, .prod.open .dd-chev { transform: rotate(180deg); color: var(--orange); }
+.hist-item.open > .hist-row .cl-name { color: var(--orange-ink); }
+button.prod-top { width: 100%; padding: 0; border: none; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+
+.dd-panel { display: flex; flex-direction: column; gap: 10px; padding-left: 48px; animation: fadeIn .2s ease; }
+.dd-block { background: var(--surface); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.hist-detail .dd-block { background: var(--soft); margin-top: 10px; }
+.dd-title { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+.dd-line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--text-2); }
+.dd-line span { min-width: 0; }
+.dd-line small { color: var(--muted); }
+.dd-line b { font-weight: 600; color: var(--text); white-space: nowrap; }
+.dd-line b.neg { color: var(--red); }
+.dd-line.total { padding-top: 6px; border-top: 1px solid var(--divider); margin-top: 2px; color: var(--text); font-weight: 600; }
+
+.kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.kv { background: var(--surface); border-radius: 14px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kv-label { font-size: 11px; font-weight: 600; color: var(--muted); }
+.kv-val { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.kv-sub { font-size: 11.5px; color: var(--muted); }
+
+.dd-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; padding: 4px 2px 12px; }
+.fact { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.fact span { font-size: 11px; font-weight: 600; color: var(--muted); }
+.fact b { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dd-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.dd-actions .btn { flex: 1 1 0; min-width: 96px; }
+.receipt-view { margin-top: 10px; }
+.ret-note { color: var(--orange-ink); font-weight: 600; }
+
+.htag.returned { background: var(--red-tint); color: var(--red); }
+.htag.partial_return { background: var(--orange-tint); color: var(--orange-ink); }
+
+/* Return pop-up */
+.ret-seg { margin-bottom: 12px; }
+.ret-lines { display: flex; flex-direction: column; gap: 8px; }
+.ret-line { padding: 10px 12px; border-radius: 14px; background: var(--soft); }
+.ret-qty { font-size: 15px; font-weight: 600; color: var(--text-2); flex-shrink: 0; }
+.modal .mode-seg { background: var(--soft); }
+.modal .mode-btn.active { background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.ret-line + .ret-line { border-top: none; }
+.ret-line .qty-input { background: var(--surface); }
+
+.hist-detail .sheet-note { display: flex; align-items: flex-start; gap: 8px; }
+.hist-detail .sheet-note svg { margin-top: 2px; }
+@media (max-width: 480px) {
+  .dd-panel { padding-left: 0; }
+  .prod-actions { padding-left: 0; }
+}
+
 /* ══════════════════════ SETTINGS PAGE ══════════════════════ */
 [hidden] { display: none !important; }
 .brand-mark.has-logo { background: var(--surface); overflow: hidden; }

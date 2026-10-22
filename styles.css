@@ -111,6 +111,7 @@ svg { display: block; flex-shrink: 0; }
 @keyframes spin    { to { transform: rotate(360deg); } }
 @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
 @keyframes sheetUp { from { transform: translateY(100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 @keyframes popIn   { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes toastIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
@@ -337,7 +338,7 @@ input[type="checkbox"] { width: 20px; height: 20px; padding: 0; box-shadow: none
 .modal {
   width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto; overscroll-behavior: contain;
   background: var(--surface); border-radius: 26px 26px 0 0; box-shadow: var(--pop-shadow);
-  padding: 10px 16px calc(18px + var(--safe-b)); animation: sheetUp .25s cubic-bezier(.2,.8,.2,1);
+  padding: 10px 16px calc(18px + var(--safe-b)); animation: sheetUp .34s cubic-bezier(.22,.8,.24,1);
 }
 .modal::before { content: ''; display: block; width: 40px; height: 5px; border-radius: 3px; background: var(--divider); margin: 0 auto 14px; }
 .modal-title { display: flex; align-items: center; gap: 12px; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 18px; }
@@ -504,7 +505,7 @@ input[type="checkbox"] { width: 20px; height: 20px; padding: 0; box-shadow: none
 .sheet {
   position: relative; width: 100%; max-width: 560px; max-height: 78vh; background: var(--surface);
   border-radius: 28px 28px 0 0; padding: 10px 16px calc(28px + var(--safe-b));
-  display: flex; flex-direction: column; gap: 12px; animation: sheetUp .25s cubic-bezier(.2,.8,.2,1);
+  display: flex; flex-direction: column; gap: 12px; animation: sheetUp .34s cubic-bezier(.22,.8,.24,1);
 }
 .sheet-handle { width: 40px; height: 4px; border-radius: 2px; background: var(--handle); align-self: center; flex-shrink: 0; }
 .sheet-head { display: flex; align-items: center; gap: 10px; }
@@ -990,12 +991,15 @@ button.prod-top { display: flex; align-items: center; gap: 12px; padding: 12px 2
    ══════════════════════════════════════════════════════════════════════ */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 input, select, textarea { font-size: max(16px, 1em); }      /* below 16px iPhone zooms the page */
-.tabbar { transition: transform .22s ease, opacity .18s ease; }
+.tabbar { transition: transform .34s cubic-bezier(.22,.8,.24,1), opacity .26s ease; will-change: transform; }
 html.kb-open .tabbar { transform: translateY(calc(100% + 40px)); opacity: 0; pointer-events: none; }
-html.kb-open .page { padding-bottom: 24px; }
 
 /* Pop-ups and bottom sheets always sit inside the visible area, right above the keyboard */
-.overlay, .sheet-wrap { inset: auto 0 auto 0; top: var(--vvt, 0px); height: var(--vvh, 100dvh); }
+.overlay, .sheet-wrap {
+  inset: auto 0 auto 0; top: var(--vvt, 0px); height: var(--vvh, 100dvh);
+  transition: height .34s cubic-bezier(.22,.8,.24,1), top .34s cubic-bezier(.22,.8,.24,1);
+}
+.modal, .sheet { transition: max-height .34s cubic-bezier(.22,.8,.24,1), padding-bottom .3s ease, border-radius .3s ease; }
 .modal { max-height: calc(var(--vvh, 100dvh) * 0.92); }
 .sheet { max-height: calc(var(--vvh, 100dvh) * 0.82); }
 html.kb-open .modal, html.kb-open .sheet { max-height: calc(var(--vvh, 100dvh) - 10px); border-radius: 22px 22px 0 0; }

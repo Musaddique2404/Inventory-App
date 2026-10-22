@@ -4248,3 +4248,47 @@ async function buildStatement(mode, how) {
     state.pdfBusy = false;
   }
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KEYBOARD-AWARE LAYOUT (phones)
+// Tracks the visible area above the on-screen keyboard so pop-ups stay in view,
+// the bottom tab bar steps aside while typing, and the focused box isn't hidden.
+// ══════════════════════════════════════════════════════════════════════════════
+(function keyboardAware() {
+  const root = document.documentElement;
+  const vv = window.visualViewport;
+  const isField = el => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+    (el.tagName === 'INPUT' && !/^(checkbox|radio|file|button|submit|range|color)$/i.test(el.type)));
+  let fullHeight = vv ? vv.height : window.innerHeight;       // tallest the screen gets without a keyboard
+  let raf = 0;
+
+  function update() {
+    raf = 0;
+    const h = vv ? vv.height : window.innerHeight;
+    const top = vv ? vv.offsetTop : 0;
+    const typing = isField(document.activeElement);
+    if (!typing || h > fullHeight) fullHeight = Math.max(h, typing ? fullHeight : h);
+    const open = typing && fullHeight - h > 120;                 // keyboard is up
+    root.style.setProperty('--vvh', `${Math.round(h)}px`);
+    root.style.setProperty('--vvt', `${Math.round(top)}px`);
+    root.classList.toggle('kb-open', open);
+  }
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(update); };
+
+  if (vv) { vv.addEventListener('resize', schedule); vv.addEventListener('scroll', schedule); }
+  window.addEventListener('resize', schedule);
+  window.addEventListener('orientationchange', () => { fullHeight = 0; setTimeout(schedule, 300); });
+
+  // Keep the box you're typing in visible (inside pop-ups too) once the keyboard has opened
+  document.addEventListener('focusin', e => {
+    if (!isField(e.target)) return;
+    schedule();
+    setTimeout(() => {
+      if (document.activeElement !== e.target) return;
+      e.target.scrollIntoView({ block: e.target.closest('.modal, .sheet') ? 'nearest' : 'center', behavior: 'smooth' });
+    }, 320);
+  });
+  document.addEventListener('focusout', () => setTimeout(schedule, 120));
+  update();
+})();

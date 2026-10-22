@@ -1107,7 +1107,7 @@ function renderInventoryTable() {
   });
   const count = document.getElementById('inventory-count');
   if (count) {
-    if (shop === 'all') count.textContent = filtered.length === state.products.length ? 'Sorted A–Z' : `${filtered.length} of ${state.products.length} shown`;
+    if (shop === 'all') count.textContent = filtered.length === state.products.length ? `${plural(state.products.length, 'product')} · sorted A–Z` : `${filtered.length} of ${state.products.length} shown`;
     else {
       const here = state.products.filter(p => qtyIn(p, shop) > 0);
       const units = here.reduce((a, p) => a + qtyIn(p, shop), 0);
@@ -1131,27 +1131,28 @@ function renderInventoryTable() {
     const status     = stockStatus(q);
     const statusText = { out: 'Out of stock', low: 'Low stock', ok: 'In stock' }[status];
     const open = !!state.expandedProducts[p.id];
-    // Per-shop split under the name: "Main 8 · Malaz 4" (all shops) or "of 12 in all shops" (one shop)
-    const split = !multi ? '' : shop === 'all'
-      ? state.branches.map(b => `<span class="split-item"><bdi>${esc(b.name)}</bdi> <b>${stockAt(p, b.id)}</b></span>`).join('<span class="split-dot"> · </span>')
-      : `${p.quantity} in all shops`;
     return `
       <div class="prod${open ? ' open' : ''}" data-product="${p.id}">
         <button class="prod-top" type="button" onclick="toggleProductExpand('${p.id}')" aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} details">
-          <span class="ic ${status === 'ok' ? 'ic-orange' : status === 'low' ? 'ic-orange' : 'ic-red'}">${ic('box')}</span>
-          <div class="sr-text"><span class="sr-title">${esc(p.name)}</span><span class="sr-sub">Buy ${p.costPrice != null ? fmt(p.costPrice) : '—'} · Sell ${p.price != null ? fmt(p.price) : '—'}</span>${split ? `<span class="prod-split">${ic('store', 11)}${split}</span>` : ''}</div>
-          <div class="prod-qty"><b>${q}</b><span class="tag ${status}">${statusText}</span></div>
+          <span class="prod-thumb">${esc(initials(p.name))}</span>
+          <span class="prod-main">
+            <span class="prod-name">${esc(p.name)}</span>
+            <span class="prod-meta">${p.price != null ? fmt(p.price) : '<i>No price set</i>'}${shop !== 'all' && multi ? `<i>· ${p.quantity} in all shops</i>` : ''}</span>
+          </span>
+          <span class="prod-stock"><b class="num">${q}</b><span class="stock-st ${status}">${statusText}</span></span>
           <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
         </button>
-        ${open ? productDetailHTML(p) : ''}
-        <div class="prod-actions">
-          <button class="btn btn-soft btn-sm" onclick="openEditProduct('${p.id}'); return false;" title="Edit name, prices and quantity">${ic('edit', 14)}Edit</button>
-          <button class="btn btn-stock btn-sm" onclick="openPurchaseForm('${p.id}'); return false;" title="Record a purchase for this product">${ic('plus', 14, 2.4)}Stock</button>
-          <button class="btn btn-danger btn-sm" onclick="confirmDeleteProduct('${p.id}'); return false;">${ic('trash', 14)}Delete</button>
-        </div>
+        ${open ? productDetailHTML(p) + actionBar([
+          { icon: 'edit', label: 'Edit', cls: 'primary', title: 'Edit name, prices and stock', onclick: `openEditProduct('${p.id}')` },
+          { icon: 'plus', label: 'Restock', title: 'Record a purchase for this product', onclick: `openPurchaseForm('${p.id}')` },
+          { icon: 'swapH', label: 'Transfer', title: 'Move this product to another shop', onclick: `transferProduct('${p.id}')` },
+          { icon: 'trash', label: 'Delete', cls: 'danger', title: 'Delete product', onclick: `confirmDeleteProduct('${p.id}')` },
+        ]) : ''}
       </div>`;
   }).join('');
 }
+
+function transferProduct(id) { navigateTo('transfer'); addLine(id); }
 
 function toggleProductExpand(id) {
   state.expandedProducts[id] = !state.expandedProducts[id];
@@ -1699,16 +1700,24 @@ function renderSales() {
     <div class="box move-card">
       ${ddButton({ onclick: "openSheet('customer')", icon: 'user', tone: 'ic-blue', label: 'Customer · full name', value: esc(d.customer || 'Walk-in customer'), sub: d.customer ? 'Tap to change' : 'Tap to write a name', id: 'dd-customer' })}
       ${ddButton({ onclick: "openSheet('branch', 'from')", icon: 'store', tone: 'ic-orange', label: 'Selling from', value: esc(from.name), sub: `${ic('pin', 11)}${esc(from.place || '—')}`, id: 'dd-from' })}
-      <label class="br-btn dd date-dd" for="sale-date">
-        <span class="ic40 ic-green">${ic('calendar')}</span>
-        <div class="pr-text"><span class="pr-label">Date</span><span class="pr-value">${dayLabel(d.date)}</span><span class="pr-place">${fmtDate(isoToDate(d.date))}</span></div>
-        <span class="br-chev">${ic('chevron', 16, 2.2)}</span>
-        <input type="date" id="sale-date" value="${d.date}" max="${todayISO()}" onchange="setSaleDate(this.value)" aria-label="Sale date">
-      </label>
-      <div class="note-field" style="padding:4px 2px 0">
-        <label class="pr-label" for="delivery-note">Delivery note <span class="hint">(optional)</span></label>
-        <input id="delivery-note" class="note-input" value="${esc(d.deliveryNote || '')}" placeholder="e.g. Deliver to the back door, call on arrival" autocomplete="off" oninput="saleDraft().deliveryNote = this.value">
-      </div>
+      <button class="more-toggle${state.sellMore ? ' open' : ''}" onclick="state.sellMore = !state.sellMore; renderSales()" aria-expanded="${!!state.sellMore}">
+        <span class="ic40 ic-soft">${ic('sliders')}</span>
+        <div class="pr-text"><span class="pr-label">More options</span><span class="pr-value">${dayLabel(d.date)} · ${d.deliveryNote ? 'Delivery note added' : 'No delivery note'}</span></div>
+        <span class="dd-chev">${ic('chevron', 16, 2.2)}</span>
+      </button>
+      ${state.sellMore ? `
+      <div class="more-body">
+        <label class="br-btn dd date-dd" for="sale-date">
+          <span class="ic40 ic-green">${ic('calendar')}</span>
+          <div class="pr-text"><span class="pr-label">Sale date</span><span class="pr-value">${dayLabel(d.date)}</span><span class="pr-place">${fmtDate(isoToDate(d.date))}</span></div>
+          <span class="br-chev">${ic('chevron', 16, 2.2)}</span>
+          <input type="date" id="sale-date" value="${d.date}" max="${todayISO()}" onchange="setSaleDate(this.value)" aria-label="Sale date">
+        </label>
+        <div class="note-field" style="padding:4px 2px 0">
+          <label class="pr-label" for="delivery-note">Delivery note <span class="hint">(optional)</span></label>
+          <input id="delivery-note" class="note-input" value="${esc(d.deliveryNote || '')}" placeholder="e.g. Deliver to the back door, call on arrival" autocomplete="off" oninput="saleDraft().deliveryNote = this.value">
+        </div>
+      </div>` : ''}
     </div>` : `
     <div class="box move-card">
       <button class="br-btn" onclick="openSheet('branch', 'from')">${brIc(from)}<div class="pr-text"><span class="pr-label">From</span><span class="pr-value">${esc(from.name)}</span><span class="pr-place">${ic('pin', 11)}${esc(from.place || '—')}</span></div><span class="br-chev">${ic('chevron', 16, 2.2)}</span></button>
@@ -1794,12 +1803,12 @@ function transferDetailHTML(tr) {
             <div class="tl"><span>Units</span><span class="num">${plural(tr.units || 0, 'unit')}</span></div>
             <div class="tl total"><span>Value</span><span class="num">${fmt(tr.value || 0)}</span></div>
           </div>
-          ${received ? '' : `<button class="btn btn-primary btn-block cta" onclick="receiveTransfer('${tr.id}')">${ic('check', 16, 2.6)}Mark as received at ${esc(shortBranch(tr.toName))}</button>`}
-          <div class="dd-actions">
-            <button class="btn btn-ghost btn-sm" onclick="docAction('transfer', '${tr.id}', 'share', this)">${ic('share', 14)}Share</button>
-            <button class="btn btn-ghost btn-sm" onclick="docAction('transfer', '${tr.id}', 'download', this)">${ic('download', 14)}PDF</button>
-          </div>
-          <button class="btn btn-danger btn-sm del-btn" onclick="askDeleteTransfer('${tr.id}')">${ic('trash', 14)}Delete transfer</button>
+          ${received ? '' : `<button class="btn btn-primary btn-block dd-cta" onclick="receiveTransfer('${tr.id}')">${ic('check', 16, 2.6)}Mark as received at ${esc(shortBranch(tr.toName))}</button>`}
+          ${actionBar([
+            { icon: 'share', label: 'Share', onclick: `docAction('transfer', '${tr.id}', 'share', this)` },
+            { icon: 'download', label: 'PDF', onclick: `docAction('transfer', '${tr.id}', 'download', this)` },
+            { icon: 'trash', label: 'Delete', cls: 'danger', title: 'Delete transfer', onclick: `askDeleteTransfer('${tr.id}')` },
+          ])}
         </div>`;
 }
 
@@ -1850,17 +1859,24 @@ function renderSaleCard(s) {
               <div class="dd-line"><span>${fmtDate(isoToDate(r.date))} · ${(r.items || []).map(it => `${it.quantity} × ${esc(it.productName)}`).join(', ')}${r.note ? ` <small>· ${esc(r.note)}</small>` : ''}</span><b class="num neg">−${fmt(Number(r.total) || 0)}</b></div>`).join('')}
             <div class="dd-line total"><span>Net total</span><b class="num">${fmt(saleNetTotal(s))}</b></div>
           </div>` : ''}
-          <div class="dd-actions">
-            ${canReturn ? `<button class="btn btn-soft btn-sm" onclick="openReturn('${s.id}')">${ic('refund', 14)}Return</button>` : ''}
-            <button class="btn btn-ghost btn-sm" onclick="docAction('sale', '${s.id}', 'share', this)">${ic('share', 14)}Share</button>
-            <button class="btn btn-ghost btn-sm" onclick="docAction('sale', '${s.id}', 'download', this)">${ic('download', 14)}PDF</button>
-          </div>
-          <button class="btn btn-danger btn-sm del-btn" onclick="askDeleteSale('${s.id}')">${ic('trash', 14)}Delete sale</button>
+          ${actionBar([
+            canReturn && { icon: 'refund', label: 'Return', cls: 'primary', title: 'Return items', onclick: `openReturn('${s.id}')` },
+            { icon: 'share', label: 'Share', onclick: `docAction('sale', '${s.id}', 'share', this)` },
+            { icon: 'download', label: 'PDF', onclick: `docAction('sale', '${s.id}', 'download', this)` },
+            { icon: 'trash', label: 'Delete', cls: 'danger', title: 'Delete sale', onclick: `askDeleteSale('${s.id}')` },
+          ])}
         </div>` : ''}
     </div>`;
 }
 
 function fact(label, value) { return `<div class="fact"><span>${label}</span><b>${value}</b></div>`; }
+
+// Equal-width toolbar at the bottom of an open record: icon + short label
+function actionBar(items) {
+  const list = items.filter(Boolean);
+  return `<div class="action-bar" style="--n:${list.length}">${list.map(a =>
+    `<button class="act${a.cls ? ' ' + a.cls : ''}" onclick="${a.onclick}" title="${esc(a.title || a.label)}">${ic(a.icon, 18, 2)}<span>${a.label}</span></button>`).join('')}</div>`;
+}
 
 // ── Returns: full (everything left) or partial (choose how many of each item) ──
 function returnableLeft(s) {
@@ -2725,15 +2741,14 @@ function purchaseDetailHTML(p) {
             <div class="tl"><span>Status</span><span class="htag ${tag.cls}">${esc(tag.t)}</span></div>
             ${due > 0 ? `<div class="tl"><span>Paid</span><span class="num">${fmt(paid)}</span></div><div class="tl"><span>Still to pay</span><span class="num" style="color:var(--red);font-weight:600">${fmt(due)}</span></div>` : ''}
           </div>
-          ${p.hasReceipt ? `<div id="receipt-view-${p.id}" class="receipt-view">${receipt
-            ? `<img class="receipt-full" src="${esc(receipt)}" alt="Receipt photo">`
-            : `<button class="more-btn" style="width:100%" onclick="showReceipt('${p.id}')">${ic('camera', 14)} View receipt photo</button>`}</div>` : ''}
-          ${due > 0 ? `<button class="btn btn-primary btn-block cta" onclick="markPurchasePaid('${p.id}')">${ic('check', 16, 2.6)}Mark as paid</button>` : ''}
-          <div class="dd-actions">
-            <button class="btn btn-ghost btn-sm" onclick="docAction('purchase', '${p.id}', 'share', this)">${ic('share', 14)}Share</button>
-            <button class="btn btn-ghost btn-sm" onclick="docAction('purchase', '${p.id}', 'download', this)">${ic('download', 14)}PDF</button>
-          </div>
-          <button class="btn btn-danger btn-sm del-btn" onclick="askDeletePurchase('${p.id}')">${ic('trash', 14)}Delete purchase</button>
+          ${p.hasReceipt ? `<div id="receipt-view-${p.id}" class="receipt-view">${receipt ? `<img class="receipt-full" src="${esc(receipt)}" alt="Receipt photo">` : ''}</div>` : ''}
+          ${due > 0 ? `<button class="btn btn-primary btn-block dd-cta" onclick="markPurchasePaid('${p.id}')">${ic('check', 16, 2.6)}Mark as paid</button>` : ''}
+          ${actionBar([
+            p.hasReceipt && !receipt && { icon: 'camera', label: 'Receipt', title: 'View receipt photo', onclick: `showReceipt('${p.id}')` },
+            { icon: 'share', label: 'Share', onclick: `docAction('purchase', '${p.id}', 'share', this)` },
+            { icon: 'download', label: 'PDF', onclick: `docAction('purchase', '${p.id}', 'download', this)` },
+            { icon: 'trash', label: 'Delete', cls: 'danger', title: 'Delete purchase', onclick: `askDeletePurchase('${p.id}')` },
+          ])}
         </div>`;
 }
 
@@ -2960,9 +2975,9 @@ async function showReceipt(id) {
   try {
     const snap = await userCol('receipts').doc(id).get();
     const data = snap && (typeof snap.data === 'function' ? snap.data() : null);
-    if (data && data.image) state.receiptCache[id] = data.image;
+    if (data && data.image) { state.receiptCache[id] = data.image; renderCurrentPage(); return; }
     const el = document.getElementById(`receipt-view-${id}`) || box;
-    el.innerHTML = data && data.image ? `<img class="receipt-full" src="${esc(data.image)}" alt="Receipt photo">` : `<div class="sheet-empty">No receipt found</div>`;
+    el.innerHTML = `<div class="sheet-empty">No receipt found</div>`;
   } catch (e) { console.error(e); box.innerHTML = `<div class="sheet-empty">Could not load the receipt</div>`; }
 }
 
@@ -3834,10 +3849,10 @@ function renderHistoryBody() {
       </div>
       ${stats.length ? `<div class="stat-grid">${stats.map(s => `
         <div class="stat"><span class="stat-label">${s.label}</span><span class="stat-val${s.tone ? ' ' + s.tone : ''}">${s.value}</span><span class="stat-sub">${s.sub}</span></div>`).join('')}</div>` : ''}
-      <div class="dd-actions" style="margin-top:2px">
-        <button class="btn btn-soft btn-sm" onclick="askStatement('download', this)" ${list.length ? '' : 'disabled'}>${ic('download', 14)}Download PDF</button>
-        <button class="btn btn-ghost btn-sm" onclick="askStatement('share', this)" ${list.length ? '' : 'disabled'}>${ic('share', 14)}Share</button>
-      </div>
+      ${list.length ? actionBar([
+        { icon: 'download', label: 'Download PDF', cls: 'primary', title: 'One PDF of everything shown', onclick: "askStatement('download')" },
+        { icon: 'share', label: 'Share', title: 'Share one PDF of everything shown', onclick: "askStatement('share')" },
+      ]) : ''}
     </div>
 
     <div class="box">
@@ -3946,11 +3961,11 @@ function returnCardHTML(r) {
             ${(Number(ret.vat) || 0) > 0 ? `<div class="tl"><span>Subtotal</span><span class="num">${fmt(Number(ret.subtotal) || 0)}</span></div><div class="tl"><span>VAT</span><span class="num">${fmt(Number(ret.vat))}</span></div>` : ''}
             <div class="tl total"><span>Refund</span><span class="num">${fmt(Number(ret.total) || 0)}</span></div>
           </div>
-          <div class="dd-actions">
-            <button class="btn btn-soft btn-sm" onclick="openHistory({ q: '${esc(saleInvoiceNo(s))}' })">${ic('doc', 14)}Open invoice</button>
-            <button class="btn btn-ghost btn-sm" onclick="docAction('return', '${r.id}', 'share', this)">${ic('share', 14)}Share</button>
-            <button class="btn btn-ghost btn-sm" onclick="docAction('return', '${r.id}', 'download', this)">${ic('download', 14)}PDF</button>
-          </div>
+          ${actionBar([
+            { icon: 'doc', label: 'Invoice', cls: 'primary', title: 'Open the original invoice', onclick: `openHistory({ q: '${esc(saleInvoiceNo(s))}' })` },
+            { icon: 'share', label: 'Share', onclick: `docAction('return', '${r.id}', 'share', this)` },
+            { icon: 'download', label: 'PDF', onclick: `docAction('return', '${r.id}', 'download', this)` },
+          ])}
         </div>` : ''}
     </div>`;
 }

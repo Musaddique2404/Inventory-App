@@ -33,7 +33,6 @@ function userTransfersCol() { return userCol('transfers'); }
 const MAIN_BRANCH = 'main';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const LOW_STOCK_THRESHOLD = 5;
 const PAYMENT_TYPES = [
   { id: 'cash',     label: 'Cash'     },
   { id: 'card',     label: 'Card'     },
@@ -343,8 +342,6 @@ function showAppScreen(user) {
 
   // Header + tab bar icons
   updateThemeChrome();
-  const out = document.getElementById('logout-btn');
-  if (out) out.innerHTML = ic('power', 17);
   const set = document.getElementById('settings-btn');
   if (set) set.innerHTML = ic('sliders', 17);
   document.querySelectorAll('.tab-ic[data-icon]').forEach(el => { el.innerHTML = ic(el.dataset.icon, 19); });
@@ -418,6 +415,7 @@ function startFirestoreListeners() {
   state._unsubSettings = userCol('settings').doc('app')
     .onSnapshot(doc => {
       state.settings = doc.exists ? doc.data() : null;
+      applyBranding();
       scheduleRender();
     }, err => console.error('Settings listener error:', err));
 
@@ -669,6 +667,7 @@ function renderCurrentPage() {
     case 'inventory': renderInventory();  break;
     case 'sales':     renderSales();      break;
     case 'purchases': renderPurchases();  break;
+    case 'settings':  renderSettings();   break;
   }
   // Keep an open picker list in sync when data changes in real time
   if (state.sheet && document.getElementById('sheet-list')) renderSheetList();
@@ -903,7 +902,7 @@ function renderDashboard() {
   const container = document.getElementById('dashboard-page');
   if (!container) return;
 
-  const lowStock   = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD);
+  const lowStock   = state.products.filter(p => p.quantity > 0 && p.quantity <= lowStockLevel());
   const outCount   = state.products.filter(p => p.quantity === 0).length;
   const stats      = calculateSaleStats(getFilteredSales());
   const allTimeRev = state.sales.reduce((s, x) => s + saleTotal(x), 0);
@@ -949,7 +948,7 @@ function renderDashboard() {
     <div class="list-card">
       <div class="lc-row"><span class="ic ic-orange">${ic('box')}</span><div class="lc-text"><span class="lc-title">Total products</span><span class="lc-sub">${outCount} out of stock</span></div><span class="lc-val">${state.products.length}</span></div>
       <div class="lc-div"></div>
-      <div class="lc-row"><span class="ic ic-red">${ic('alert')}</span><div class="lc-text"><span class="lc-title">Low stock alert</span><span class="lc-sub">Items ≤ ${LOW_STOCK_THRESHOLD} units remaining</span></div><span class="lc-val">${lowStock.length}</span></div>
+      <div class="lc-row"><span class="ic ic-red">${ic('alert')}</span><div class="lc-text"><span class="lc-title">Low stock alert</span><span class="lc-sub">Items ≤ ${lowStockLevel()} units remaining</span></div><span class="lc-val">${lowStock.length}</span></div>
       <div class="lc-div"></div>
       <div class="lc-row"><span class="ic ic-green">${ic('bars')}</span><div class="lc-text"><span class="lc-title">All-time sales</span><span class="lc-sub">${allTimeRev > 0 ? `${fmt(allTimeRev)} total` : 'No revenue tracked'}</span></div><span class="lc-val">${state.sales.length}</span></div>
     </div>
@@ -1000,7 +999,7 @@ function openSale(id) {
 function renderInventory() {
   const container = document.getElementById('inventory-page');
   if (!container) return;
-  const low = state.products.filter(p => p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD).length;
+  const low = state.products.filter(p => p.quantity > 0 && p.quantity <= lowStockLevel()).length;
   const out = state.products.filter(p => p.quantity === 0).length;
   const sub = `${plural(state.products.length, 'product')} · ${low} low · ${out} out of stock`;
 
@@ -1038,7 +1037,7 @@ function renderInventoryTable() {
   const term = state.inventorySearch.toLowerCase();
   const filtered = state.products.filter(p => {
     if (!(p.name ?? '').toLowerCase().includes(term)) return false;
-    if (filter === 'low') return p.quantity > 0 && p.quantity <= LOW_STOCK_THRESHOLD;
+    if (filter === 'low') return p.quantity > 0 && p.quantity <= lowStockLevel();
     if (filter === 'out') return p.quantity === 0;
     return true;
   });
@@ -1053,8 +1052,8 @@ function renderInventoryTable() {
   }
 
   list.innerHTML = filtered.map(p => {
-    const status     = p.quantity === 0 ? 'out' : p.quantity <= LOW_STOCK_THRESHOLD ? 'low' : 'ok';
-    const statusText = p.quantity === 0 ? 'Out of stock' : p.quantity <= LOW_STOCK_THRESHOLD ? 'Low stock' : 'In stock';
+    const status     = p.quantity === 0 ? 'out' : p.quantity <= lowStockLevel() ? 'low' : 'ok';
+    const statusText = p.quantity === 0 ? 'Out of stock' : p.quantity <= lowStockLevel() ? 'Low stock' : 'In stock';
     return `
       <div class="prod" data-product="${p.id}">
         <div class="prod-top">
@@ -1089,9 +1088,20 @@ function confirmDeleteProduct(id) {
 // SALES PAGE — Sell to a customer, or Transfer stock between branches
 // ══════════════════════════════════════════════════════════════════════════════
 
-// ── VAT settings (Settings button in the top bar) ───────────────────────────
-const DEFAULT_SETTINGS = { vatRate: 15, vatSales: true, vatPurchases: true };
+// ══════════════════════════════════════════════════════════════════════════════
+// SETTINGS PAGE — business profile (name, tagline, logo), VAT, stock alerts,
+// appearance and account. Saved per account in users/{uid}/settings/app.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const DEFAULT_SETTINGS = {
+  appName: 'Ateer', tagline: "Musaddique's", logo: '',
+  vatRate: 15, vatSales: true, vatPurchases: true,
+  lowStock: 5,
+};
+const BRAND_CACHE_KEY = 'ateer-brand';
+
 function appSettings() { return { ...DEFAULT_SETTINGS, ...(state.settings || {}) }; }
+
 // VAT % to apply right now for 'sales' or 'purchases' (0 when switched off)
 function vatPct(kind) {
   const s = appSettings();
@@ -1105,62 +1115,334 @@ function withVat(sub, pct) {
 }
 function pctLabel(n) { return `${Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`; }
 
+// Products with this many units or fewer count as "Low stock"
+function lowStockLevel() {
+  const n = Number(appSettings().lowStock);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.lowStock;
+}
+
+// ── Branding: top bar, sign-in screen, browser tab title and icon ────────────
+function readBrandCache() {
+  try { return JSON.parse(localStorage.getItem(BRAND_CACHE_KEY) || 'null'); } catch (e) { return null; }
+}
+function brand() {
+  const s = { ...DEFAULT_SETTINGS, ...(state.settings || readBrandCache() || {}) };
+  return {
+    name:    String(s.appName || '').trim() || DEFAULT_SETTINGS.appName,
+    tagline: String(s.tagline ?? '').trim(),
+    logo:    typeof s.logo === 'string' && s.logo.startsWith('data:image/') ? s.logo : '',
+  };
+}
+function brandMarkHTML(b) {
+  return b.logo ? `<img src="${esc(b.logo)}" alt="">` : esc(b.name.charAt(0).toUpperCase());
+}
+function applyBranding() {
+  const b = brand();
+  document.querySelectorAll('.brand-mark').forEach(el => {
+    el.innerHTML = brandMarkHTML(b);
+    el.classList.toggle('has-logo', !!b.logo);
+  });
+  document.querySelectorAll('.brand-name').forEach(el => { el.textContent = b.name; });
+  document.querySelectorAll('.brand-owner').forEach(el => { el.textContent = b.tagline; el.hidden = !b.tagline; });
+  document.title = `${b.name} - Inventory Management System`;
+  let icon = document.querySelector('link[rel="icon"]');
+  if (b.logo) {
+    if (!icon) { icon = document.createElement('link'); icon.rel = 'icon'; document.head.appendChild(icon); }
+    icon.href = b.logo;
+  } else if (icon) icon.remove();
+  // Remember the look on this device so the sign-in screen shows it too
+  if (state.settings) {
+    try { localStorage.setItem(BRAND_CACHE_KEY, JSON.stringify({ appName: b.name, tagline: b.tagline, logo: b.logo })); } catch (e) {}
+  }
+}
+
+// ── Saving ──────────────────────────────────────────────────────────────────
+async function saveSettingsPatch(patch, okMsg) {
+  const before = state.settings;
+  state.settings = { ...(state.settings || {}), ...patch };     // show the change right away
+  applyBranding();
+  renderCurrentPage();
+  try {
+    await userCol('settings').doc('app').set({ ...patch, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    if (okMsg) showToast(okMsg);
+    return true;
+  } catch (e) {
+    console.error(e);
+    state.settings = before;
+    applyBranding();
+    renderCurrentPage();
+    showToast('Could not save settings', 'error');
+    return false;
+  }
+}
+function toggleSetting(key) { saveSettingsPatch({ [key]: !appSettings()[key] }); }
+
+// ── Page ────────────────────────────────────────────────────────────────────
 function openSettings() {
-  const s = appSettings();
-  const toggle = (key, title, sub) => `
-    <button type="button" class="toggle-row" role="switch" data-key="${key}" aria-checked="${!!s[key]}" onclick="flipSetting(this)">
-      <span class="tr-text"><span class="tr-title">${title}</span><span class="tr-sub">${sub}</span></span>
-      <span class="switch${s[key] ? ' on' : ''}"><span></span></span>
-    </button>`;
+  if (state.currentPage !== 'settings') state.prevPage = state.currentPage;
+  closeSheet();
+  navigateTo('settings');
+}
+function closeSettings() { navigateTo(state.prevPage || 'dashboard'); }
+
+const SET_CHEV = () => `<span class="set-chev">${ic('chevron', 16, 2.2)}</span>`;
+function setRow(o) {
+  const tag = o.onclick ? 'button' : 'div';
+  return `
+      <${tag} class="set-row${o.cls ? ' ' + o.cls : ''}"${o.onclick ? ` type="button" onclick="${o.onclick}"` : ''}${o.attrs || ''}>
+        <span class="ic ${o.tone || 'ic-orange'}">${ic(o.icon, 17)}</span>
+        <span class="set-text"><span class="set-title">${o.title}</span>${o.sub ? `<span class="set-sub">${o.sub}</span>` : ''}</span>
+        ${o.end || ''}
+      </${tag}>`;
+}
+function setValue(v) { return `<span class="set-val">${v}</span>${SET_CHEV()}`; }
+function setSwitchRow(key, o) {
+  const on = !!appSettings()[key];
+  return setRow({ ...o, onclick: `toggleSetting('${key}')`, attrs: ` role="switch" aria-checked="${on}"`,
+    end: `<span class="switch${on ? ' on' : ''}"><span></span></span>` });
+}
+
+function renderSettings() {
+  const c = document.getElementById('settings-page');
+  if (!c) return;
+  const s = appSettings(), b = brand(), u = state.currentUser || {};
+  const dark = isDark();
+  const low = lowStockLevel();
+  c.innerHTML = `
+    <div class="page-head set-head">
+      <button class="round-btn back-btn" onclick="closeSettings()" aria-label="Back" title="Back">${ic('chevron', 18, 2.2)}</button>
+      <div class="page-head-text"><span class="page-title">Settings</span><span class="page-date">Business profile, tax and preferences</span></div>
+    </div>
+
+    <button class="set-hero" type="button" onclick="openProfileEditor()" aria-label="Edit business profile">
+      <span class="set-logo${b.logo ? ' has-logo' : ''}">${brandMarkHTML(b)}</span>
+      <span class="set-hero-text">
+        <span class="set-hero-name">${esc(b.name)}</span>
+        <span class="set-hero-sub">${b.tagline ? esc(b.tagline) : 'Add a tagline'}</span>
+        <span class="set-hero-link">${ic('edit', 13)}Edit name, tagline &amp; logo</span>
+      </span>
+      ${SET_CHEV()}
+    </button>
+
+    <div class="set-section">
+      <span class="set-group-title">Tax</span>
+      <div class="set-group">
+        ${setSwitchRow('vatSales', { icon: 'trend', tone: 'ic-green', title: 'VAT on sales', sub: s.vatSales ? `${pctLabel(s.vatRate)} added to every sale` : 'Sales are saved without VAT' })}
+        ${setSwitchRow('vatPurchases', { icon: 'truck', tone: 'ic-blue', title: 'VAT on vendor purchases', sub: s.vatPurchases ? `${pctLabel(s.vatRate)} added to every purchase` : 'Purchases are saved without VAT' })}
+        ${setRow({ icon: 'dollar', title: 'VAT rate', sub: 'Used whenever VAT is on', end: setValue(pctLabel(s.vatRate)), onclick: "openNumberSetting('vatRate')" })}
+      </div>
+    </div>
+
+    <div class="set-section">
+      <span class="set-group-title">Inventory</span>
+      <div class="set-group">
+        ${setRow({ icon: 'alert', tone: 'ic-red', title: 'Low stock alert', sub: low > 0 ? `Warn when ${plural(low, 'unit')} or fewer are left` : 'Low stock warnings are off', end: setValue(low > 0 ? plural(low, 'unit') : 'Off'), onclick: "openNumberSetting('lowStock')" })}
+      </div>
+    </div>
+
+    <div class="set-section">
+      <span class="set-group-title">Appearance</span>
+      <div class="set-group">
+        ${setRow({ icon: dark ? 'moon' : 'sun', tone: 'ic-purple', title: 'Theme', sub: 'Saved on this device',
+          end: `<span class="set-seg" role="group" aria-label="Theme">
+            <button type="button" class="${dark ? '' : 'on'}" aria-pressed="${!dark}" onclick="setTheme('light')">Light</button>
+            <button type="button" class="${dark ? 'on' : ''}" aria-pressed="${dark}" onclick="setTheme('dark')">Dark</button>
+          </span>` })}
+      </div>
+    </div>
+
+    <div class="set-section">
+      <span class="set-group-title">Account</span>
+      <div class="set-group">
+        ${setRow({ icon: 'user', tone: 'ic-blue', title: esc(u.displayName || 'Signed in as'), sub: esc(u.email || '') })}
+        ${setRow({ icon: 'bolt', title: 'Change password', sub: 'We’ll email you a reset link', end: SET_CHEV(), onclick: 'askPasswordReset()' })}
+        ${setRow({ icon: 'power', tone: 'ic-red', title: 'Sign out', cls: 'danger', onclick: 'askSignOut()' })}
+      </div>
+    </div>
+
+    <p class="set-foot">${esc(b.name)} · Inventory management<br>Your data syncs to the cloud and only you can see it.</p>`;
+}
+
+function setTheme(mode) {
+  if ((mode === 'dark') !== isDark()) toggleTheme();
+  if (state.currentPage === 'settings') renderSettings();
+}
+
+// ── Business profile editor (name, tagline, logo) ───────────────────────────
+function openProfileEditor() {
+  const b = brand();
+  state.logoDraft = b.logo;
   showModal(`
-    <div class="modal-title"><span class="ic ic-orange">${ic('sliders')}</span>Settings</div>
-    <form id="settings-form" onsubmit="return saveSettings(event)">
+    <div class="modal-title"><span class="ic ic-orange">${ic('store')}</span>Business profile</div>
+    <form id="profile-form" onsubmit="return saveProfile(event)">
       <div class="form-grid">
-        <span class="form-label" style="margin-bottom:0">VAT</span>
-        ${toggle('vatSales', 'Add VAT to sales', 'Added on top of the sale subtotal')}
-        ${toggle('vatPurchases', 'Add VAT to vendor purchases', 'Added on top of the purchase subtotal')}
-        <div class="field">
-          <label for="vat-rate">VAT rate</label>
-          <div class="sar-field"><span>%</span><input type="number" id="vat-rate" name="vatRate" min="0" max="100" step="0.01" inputmode="decimal" value="${s.vatRate}" required></div>
+        <div class="logo-edit">
+          <span class="set-logo big${b.logo ? ' has-logo' : ''}" id="logo-preview">${brandMarkHTML(b)}</span>
+          <div class="logo-actions">
+            <span class="set-title">Logo</span>
+            <div class="logo-btns">
+              <label class="btn btn-soft btn-sm">${ic('camera', 14)}<span id="logo-pick-label">${b.logo ? 'Change' : 'Upload logo'}</span><input type="file" accept="image/*" onchange="pickLogo(this)" hidden></label>
+              <button type="button" class="btn btn-ghost btn-sm" id="logo-remove" onclick="removeLogoDraft()"${b.logo ? '' : ' hidden'}>Remove</button>
+            </div>
+            <span class="hint">PNG or JPG · a square image looks best</span>
+          </div>
         </div>
-        <p class="hint">Changes apply to new sales and purchases. Saved ones keep the VAT they were recorded with.</p>
+        <div class="field">
+          <label for="set-name">App name <span class="req">*</span></label>
+          <input type="text" id="set-name" name="appName" maxlength="40" value="${esc(b.name)}" placeholder="e.g. Ateer" required oninput="updateLogoPreview()">
+        </div>
+        <div class="field">
+          <label for="set-tagline">Tagline <span class="hint">(optional · shown above the name)</span></label>
+          <input type="text" id="set-tagline" name="tagline" maxlength="40" value="${esc(b.tagline)}" placeholder="e.g. Musaddique's">
+        </div>
         <div class="form-actions">
           <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-          <button type="submit" class="btn btn-primary" id="btn-save-settings">Save settings</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-profile">Save</button>
         </div>
       </div>
     </form>`);
 }
 
-function flipSetting(btn) {
-  const on = btn.getAttribute('aria-checked') !== 'true';
-  btn.setAttribute('aria-checked', String(on));
-  btn.querySelector('.switch').classList.toggle('on', on);
+function updateLogoPreview() {
+  const el = document.getElementById('logo-preview');
+  if (!el) return;
+  const name = (document.getElementById('set-name')?.value || '').trim() || DEFAULT_SETTINGS.appName;
+  el.innerHTML = brandMarkHTML({ name, logo: state.logoDraft });
+  el.classList.toggle('has-logo', !!state.logoDraft);
+  const rm = document.getElementById('logo-remove');
+  if (rm) rm.hidden = !state.logoDraft;
+  const lbl = document.getElementById('logo-pick-label');
+  if (lbl) lbl.textContent = state.logoDraft ? 'Change' : 'Upload logo';
+}
+function removeLogoDraft() { state.logoDraft = ''; updateLogoPreview(); }
+
+// Shrinks the picked image to 256px so it stays small enough to save with the settings
+function pickLogo(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { showToast('Choose an image file', 'error'); input.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 256;
+      const w0 = img.naturalWidth || max, h0 = img.naturalHeight || max;
+      const scale = Math.min(1, max / Math.max(w0, h0));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w0 * scale));
+      canvas.height = Math.max(1, Math.round(h0 * scale));
+      const ctx = canvas.getContext('2d');
+      let data = '';
+      if (!/jpe?g/i.test(file.type)) {                 // keep transparency for PNG / WebP / SVG logos
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        data = canvas.toDataURL('image/png');
+      }
+      if (!data || data.length > 200000) {
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        data = canvas.toDataURL('image/jpeg', 0.85);
+      }
+      state.logoDraft = data;
+      updateLogoPreview();
+    };
+    img.onerror = () => showToast('That file is not an image', 'error');
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
 }
 
-async function saveSettings(event) {
+async function saveProfile(event) {
   event.preventDefault();
   const form = event.target;
-  const rate = parseFloat(form.elements.vatRate.value);
-  if (isNaN(rate) || rate < 0 || rate > 100) { showToast('Enter a VAT rate between 0 and 100', 'error'); return false; }
-  const on = key => form.querySelector(`[data-key="${key}"]`).getAttribute('aria-checked') === 'true';
-  const next = { vatRate: rate, vatSales: on('vatSales'), vatPurchases: on('vatPurchases') };
-  const btn = document.getElementById('btn-save-settings');
-  if (btn) btn.disabled = true;
-  try {
-    await userCol('settings').doc('app').set({ ...next, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    state.settings = { ...(state.settings || {}), ...next };
-    closeModal();
-    renderCurrentPage();
-    showToast('Settings saved');
-  } catch (e) {
-    console.error(e);
-    if (btn) btn.disabled = false;
-    showToast('Failed to save settings', 'error');
-  }
+  const appName = form.elements.appName.value.trim();
+  const tagline = form.elements.tagline.value.trim();
+  if (!appName) { showToast('Enter the app name', 'error'); form.elements.appName.focus(); return false; }
+  const btn = document.getElementById('btn-save-profile');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const ok = await saveSettingsPatch({ appName, tagline, logo: state.logoDraft || '' }, 'Business profile saved');
+  if (ok) closeModal();
+  else if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
   return false;
 }
-const TAG_LABEL = { paid: 'Paid', refunded: 'Refunded', in_transit: 'In transit', received: 'Received' };
+
+// ── Number settings (VAT rate, low stock level) ─────────────────────────────
+const NUMBER_SETTINGS = {
+  vatRate:  { title: 'VAT rate', icon: 'dollar', label: 'VAT rate', unit: '%', min: 0, max: 100, step: '0.01', decimal: true,
+              note: 'Added on top of the subtotal when VAT is on. Saved sales and purchases keep the rate they used.' },
+  lowStock: { title: 'Low stock alert', icon: 'alert', label: 'Warn when stock is at or below', unit: 'Units', min: 0, max: 100000, step: '1', decimal: false,
+              note: 'Products at or below this number show as “Low stock” on the Dashboard and Inventory. Set 0 to turn it off.' },
+};
+function openNumberSetting(key) {
+  const cfg = NUMBER_SETTINGS[key];
+  if (!cfg) return;
+  const value = key === 'lowStock' ? lowStockLevel() : appSettings()[key];
+  showModal(`
+    <div class="modal-title"><span class="ic ic-orange">${ic(cfg.icon)}</span>${cfg.title}</div>
+    <form onsubmit="return saveNumberSetting(event, '${key}')">
+      <div class="form-grid">
+        <div class="field">
+          <label for="num-setting">${cfg.label}</label>
+          <div class="sar-field"><span>${cfg.unit}</span><input type="number" id="num-setting" min="${cfg.min}" max="${cfg.max}" step="${cfg.step}" inputmode="${cfg.decimal ? 'decimal' : 'numeric'}" value="${esc(value)}" required></div>
+        </div>
+        <p class="modal-note" style="margin:0">${cfg.note}</p>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </form>`);
+  const input = document.getElementById('num-setting');
+  if (input) input.select();
+}
+async function saveNumberSetting(event, key) {
+  event.preventDefault();
+  const cfg = NUMBER_SETTINGS[key];
+  const raw = document.getElementById('num-setting').value;
+  const n = cfg.decimal ? parseFloat(raw) : parseInt(raw, 10);
+  if (raw === '' || isNaN(n) || n < cfg.min || n > cfg.max) {
+    showToast(`Enter a number from ${cfg.min} to ${cfg.max.toLocaleString('en-US')}`, 'error'); return false;
+  }
+  closeModal();
+  saveSettingsPatch({ [key]: n }, `${cfg.title} saved`);
+  return false;
+}
+
+// ── Account ─────────────────────────────────────────────────────────────────
+function askPasswordReset() {
+  const email = state.currentUser?.email || '';
+  showModal(`
+    <div class="modal-title"><span class="ic ic-orange">${ic('bolt')}</span>Change password</div>
+    <p class="modal-note">We'll send a link to <b>${esc(email)}</b>. Open it to choose a new password.</p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btn-send-reset" onclick="sendPasswordReset()">Send link</button>
+    </div>`);
+}
+async function sendPasswordReset() {
+  const btn = document.getElementById('btn-send-reset');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    await auth.sendPasswordResetEmail(state.currentUser.email);
+    closeModal();
+    showToast('Reset link sent — check your email');
+  } catch (e) {
+    console.error(e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Send link'; }
+    showToast('Could not send the reset email', 'error');
+  }
+}
+function askSignOut() {
+  showModal(`
+    <div class="modal-title"><span class="ic ic-red">${ic('power')}</span>Sign out</div>
+    <p class="modal-note">You can sign back in any time — your data stays saved in the cloud.</p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="closeModal(); handleLogout()">Sign out</button>
+    </div>`);
+}
+
+applyBranding();   // show the saved name / logo straight away (also on the sign-in screen)
 
 function branchById(id) {
   return state.branches.find(b => b.id === id)
